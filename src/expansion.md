@@ -517,24 +517,7 @@ echo 'hello'$HOME   # WasSingleQuoted=true, no expansion on entire token
 
 Escape sequences allow including special characters literally.
 
-### Supported Escape Sequences
-
-| Sequence | Result | Context |
-|----------|--------|---------|
-| `\\` | `\` | Outside single quotes |
-| `\$` | `$` (literal, no expansion) | Outside single quotes |
-| `\ ` (backslash-space) | ` ` (literal space, no split) | Outside single quotes |
-| `\"` | `"` | Outside single quotes |
-| `\'` | `'` | Outside single quotes |
-| `\n` | newline character | Outside single quotes |
-| `\t` | tab character | Outside single quotes |
-| `\X` (other) | `X` | Outside single quotes |
-
-### Escape Processing Rules
-
-1. **Single quotes**: Escape sequences are NOT processed inside single quotes
-2. **Double quotes**: Escape sequences ARE processed inside double quotes
-3. **Unquoted**: Escape sequences ARE processed
+[include:_partials/escape-sequences.md](_partials/escape-sequences.md)
 
 ### Escaped Dollar Sign
 

@@ -286,44 +286,25 @@ Tokens: []
 
 Escape processing occurs outside single quotes. The backslash character (`\`) initiates an escape sequence.
 
-### 5.1 Escape Sequence Table
+[include:_partials/escape-sequences.md](_partials/escape-sequences.md)
 
-| Sequence | Result | Description |
-|----------|--------|-------------|
-| `\\` | `\` | Literal backslash |
-| `\ ` (backslash-space) | ` ` | Literal space (prevents word splitting) |
-| `\$` | `\x01$` | Escaped dollar (marked to prevent expansion) |
-| `\"` | `"` | Literal double quote |
-| `\'` | `'` | Literal single quote |
-| `\n` | newline (0x0A) | Newline character |
-| `\t` | tab (0x09) | Tab character |
-| `\X` (any other) | `X` | The character itself (backslash removed) |
-
-### 5.2 Escape Context Rules
-
-| Context | Escape Processing |
-|---------|-------------------|
-| Outside all quotes | YES - all escapes processed |
-| Inside double quotes | YES - all escapes processed |
-| Inside single quotes | NO - backslash is literal |
-
-### 5.3 The Escape Marker System
+### 5.1 The Escape Marker System
 
 When `\$` is encountered (outside single quotes), the lexer produces the two-character sequence `\x01$` rather than just `$`. This "escape marker" (`\x01`, ASCII SOH) serves as a flag to the expander that this dollar sign should NOT trigger variable expansion.
 
-#### 5.3.1 Escape Marker Constant
+#### 5.1.1 Escape Marker Constant
 
 ```go
 const EscapeMarker = '\x01'  // ASCII Start of Heading
 ```
 
-#### 5.3.2 Escape Marker Lifecycle
+#### 5.1.2 Escape Marker Lifecycle
 
 1. **Lexer**: `\$VAR` becomes `\x01$VAR`
 2. **Expander**: Sees `\x01$`, skips expansion, outputs `$VAR`
 3. **Post-expansion**: `StripEscapeMarkers()` removes any remaining `\x01` characters
 
-#### 5.3.3 StripEscapeMarkers Function
+#### 5.1.3 StripEscapeMarkers Function
 
 ```go
 func StripEscapeMarkers(s string) string {
@@ -331,7 +312,7 @@ func StripEscapeMarkers(s string) string {
 }
 ```
 
-### 5.4 Escape Examples
+### 5.2 Escape Examples
 
 ```
 Input: echo hello\ world
@@ -356,7 +337,7 @@ Tokens: [{Content: "echo", WasSingleQuoted: false},
 // Note: \n becomes actual newline character (0x0A)
 ```
 
-### 5.5 Trailing Backslash
+### 5.3 Trailing Backslash
 
 A backslash at the end of input (with nothing to escape) is preserved literally:
 
