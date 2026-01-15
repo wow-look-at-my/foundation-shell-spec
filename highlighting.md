@@ -39,32 +39,20 @@ Foundation Shell provides real-time syntax highlighting for interactive shell in
 
 ### System Components
 
-```
-                                    +------------------+
-                                    |   User Input     |
-                                    +--------+---------+
-                                             |
-                                             v
-+----------------+          +----------------+----------------+
-|   readline     |          |           Analyze()            |
-|   Painter      +--------->|   (Single Source of Truth)     |
-|   Interface    |          +----------------+----------------+
-+----------------+                           |
-                                             v
-                              +-----------------------------+
-                              |      AnalysisResult         |
-                              |  - Tokens[]                 |
-                              |  - Errors[]                 |
-                              |  - Valid bool               |
-                              +-------------+---------------+
-                                            |
-                           +----------------+----------------+
-                           |                                 |
-                           v                                 v
-                  +--------+--------+              +---------+---------+
-                  |   Highlighter   |              |   Diagnostics     |
-                  |  (Apply Theme)  |              |   (Error Display) |
-                  +-----------------+              +-------------------+
+```mermaid
+flowchart TD
+    Input[User Input]
+    Painter[readline<br>Painter Interface]
+    Analyze[Analyze&lpar;&rpar;<br>Single Source of Truth]
+    Result[AnalysisResult<br>• Tokens&lbrack;&rbrack;<br>• Errors&lbrack;&rbrack;<br>• Valid bool]
+    Highlighter[Highlighter<br>Apply Theme]
+    Diagnostics[Diagnostics<br>Error Display]
+
+    Input --> Analyze
+    Painter --> Analyze
+    Analyze --> Result
+    Result --> Highlighter
+    Result --> Diagnostics
 ```
 
 ---
