@@ -462,29 +462,9 @@ Depth:       1      2      3       210
 
 Backslash escapes provide character-level quoting outside of single quotes.
 
-### 7.1 Escape Processing Rules
+[include:_partials/escape-sequences.md](_partials/escape-sequences.md)
 
-| Context | Escape Processing |
-|---------|-------------------|
-| Outside all quotes | YES |
-| Inside double quotes | YES |
-| Inside single quotes | NO - backslash is literal |
-
-### 7.2 Escape Sequence Table
-
-| Sequence | Result | Notes |
-|----------|--------|-------|
-| `\\` | `\` | Literal backslash |
-| `\ ` | ` ` | Literal space (prevents word splitting) |
-| `\$` | `$` (marked) | Literal dollar (prevents expansion) |
-| `\"` | `"` | Literal double quote |
-| `\'` | `'` | Literal single quote |
-| `\n` | newline | Newline character (0x0A) |
-| `\t` | tab | Tab character (0x09) |
-| `\`` | `` ` `` | Literal backtick |
-| `\X` | `X` | Any other: backslash removed |
-
-### 7.3 The Escape Marker System
+### 7.1 The Escape Marker System
 
 When `\$` is processed, the lexer does not simply produce `$`. Instead, it produces the sequence `\x01$` (escape marker + dollar sign):
 
@@ -497,7 +477,7 @@ case '$':
     current.WriteRune('$')
 ```
 
-### 7.4 Escape Marker Lifecycle
+### 7.2 Escape Marker Lifecycle
 
 1. **Lexer stage**: `\$VAR` becomes `\x01$VAR` in token content
 2. **Expander stage**: Sees `\x01$`, recognizes escaped dollar, outputs `$VAR`
@@ -516,7 +496,7 @@ if i < len(token)-1 && token[i] == '\x01' && token[i+1] == '$' {
 expandedValue = lexer.StripEscapeMarkers(expandedValue)
 ```
 
-### 7.5 Escape Examples
+### 7.3 Escape Examples
 
 ```
 Input:  echo hello\ world
@@ -537,7 +517,7 @@ Tokens: ["echo", "hello\\nworld"]
 # Inside single quotes, backslash is literal
 ```
 
-### 7.6 Trailing Backslash
+### 7.4 Trailing Backslash
 
 A backslash at end of input (with nothing to escape) is preserved:
 
@@ -546,7 +526,7 @@ Input:  echo hello\
 Tokens: ["echo", "hello\\"]
 ```
 
-### 7.7 Escaped Quotes in Syntax Analyzer
+### 7.5 Escaped Quotes in Syntax Analyzer
 
 The syntax analyzer recognizes escaped characters to avoid counting them as quotes:
 

@@ -40,8 +40,8 @@ func run(srcDir, outDir string) error {
 		if err != nil {
 			return err
 		}
-		// Skip the generator directory and hidden files
-		if info.IsDir() && (info.Name() == "generator" || strings.HasPrefix(info.Name(), ".")) {
+		// Skip the generator directory, hidden files, and partial files (starting with _)
+		if info.IsDir() && (info.Name() == "generator" || strings.HasPrefix(info.Name(), ".") || strings.HasPrefix(info.Name(), "_")) {
 			return filepath.SkipDir
 		}
 		if !info.IsDir() && strings.HasSuffix(path, ".md") {
