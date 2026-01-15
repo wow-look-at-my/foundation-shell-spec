@@ -1,3 +1,9 @@
+---
+title: Expansion Specification
+description: Tilde expansion, environment variable expansion, and command substitution processing.
+recommend_after: quoting.md
+---
+
 # Foundation Shell Expansion Specification
 
 This document is the authoritative specification for Foundation Shell's expansion system. It defines how the shell transforms input text by expanding tildes, environment variables, and command substitutions.

@@ -1,3 +1,9 @@
+---
+title: Quoting Specification
+description: Quote handling for single, double, and backtick quotes with depth tracking for nested constructs.
+recommend_after: lexer.md
+---
+
 # Quoting Specification
 
 ## 1. Overview

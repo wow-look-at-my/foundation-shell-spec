@@ -1,17 +1,14 @@
 # Foundation Shell Specification
 
-# Build the generator
-build:
-    cd generator && go build -o ../bin/generate .
-
 # Generate documentation to dist/
-generate: build
+generate:
     rm -rf dist
-    ./bin/generate src dist
+    cd generator && go run . ../src ../dist
+    cp index.html dist/
 
 # Clean generated files
 clean:
-    rm -rf dist bin
+    rm -rf dist
 
 # Run generator and show output
 dev: generate

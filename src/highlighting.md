@@ -1,3 +1,9 @@
+---
+title: Syntax Highlighting Specification
+description: Semantic token types, theme system, real-time REPL highlighting, and error visualization.
+recommend_after: execution.md
+---
+
 # Foundation Shell Syntax Highlighting Specification
 
 **Version:** 1.0

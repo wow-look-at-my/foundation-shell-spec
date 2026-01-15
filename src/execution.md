@@ -1,3 +1,9 @@
+---
+title: Execution Specification
+description: Command execution, pipeline handling, builtin commands, and exit code propagation.
+recommend_after: redirection.md
+---
+
 # Execution Specification
 
 This document defines the complete specification for Foundation Shell's command execution system. The executor handles command chains, pipelines, I/O redirection, and both builtin and external commands.

@@ -1,3 +1,9 @@
+---
+title: Operators Specification
+description: Control flow operators (pipe, AND, OR, semicolon), precedence rules, and short-circuit evaluation.
+recommend_after: parser.md
+---
+
 # Operators Specification
 
 This document provides the exhaustive specification for Foundation Shell operators. This specification is the authoritative source of truth for operator behavior.
