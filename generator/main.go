@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -51,8 +53,8 @@ func run(srcDir, outDir string) error {
 		return fmt.Errorf("walking source directory: %w", err)
 	}
 
-	// Process each file
-	var processedFiles []string
+	// Parse frontmatter and process each file
+	var metas []*fileMeta
 	for _, srcPath := range mdFiles {
 		relPath, err := filepath.Rel(srcDir, srcPath)
 		if err != nil {
@@ -65,16 +67,26 @@ func run(srcDir, outDir string) error {
 			return fmt.Errorf("processing %s: %w", srcPath, err)
 		}
 
-		processedFiles = append(processedFiles, relPath)
+		meta, err := parseFrontmatter(srcPath)
+		if err != nil {
+			return fmt.Errorf("parsing frontmatter for %s: %w", srcPath, err)
+		}
+		metas = append(metas, meta)
 		fmt.Printf("Processed: %s\n", relPath)
 	}
 
+	// Sort by recommend_after
+	sortedMetas, err := topoSort(metas)
+	if err != nil {
+		return err
+	}
+
 	// Generate llms.txt
-	if err := generateLLMsTxt(outDir, processedFiles); err != nil {
+	if err := generateLLMsTxt(outDir, sortedMetas); err != nil {
 		return fmt.Errorf("generating llms.txt: %w", err)
 	}
 
-	fmt.Printf("\nGenerated %d files + llms.txt\n", len(processedFiles))
+	fmt.Printf("\nGenerated %d files + llms.txt\n", len(sortedMetas))
 	return nil
 }
 
@@ -126,27 +138,135 @@ func processIncludes(srcDir, currentDir, content string) string {
 	})
 }
 
-func generateLLMsTxt(outDir string, files []string) error {
-	var builder strings.Builder
+// fileMeta holds frontmatter metadata for a file
+type fileMeta struct {
+	file           string
+	title          string
+	description    string
+	recommendAfter string // filename this should come after
+}
 
-	builder.WriteString("# Foundation Shell Specification\n\n")
-	builder.WriteString("This is the authoritative specification for Foundation Shell.\n\n")
-	builder.WriteString("## Documentation Files\n\n")
+// parseFrontmatter extracts title, description, and recommend_after from file
+func parseFrontmatter(path string) (*fileMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
 
-	// Sort files for consistent output
-	for _, file := range files {
-		// Create relative URL path
-		urlPath := strings.ReplaceAll(file, string(filepath.Separator), "/")
-		builder.WriteString(fmt.Sprintf("- [%s](%s)\n", file, urlPath))
+	filename := filepath.Base(path)
+	meta := &fileMeta{file: filename}
+	scanner := bufio.NewScanner(f)
+
+	// Look for YAML frontmatter
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("%s: missing frontmatter", filename)
+	}
+	firstLine := scanner.Text()
+	if firstLine != "---" {
+		return nil, fmt.Errorf("%s: missing frontmatter (must start with ---)", filename)
 	}
 
-	builder.WriteString("\n## Reading Order\n\n")
-	builder.WriteString("For best understanding, read in this order:\n")
-	builder.WriteString("1. README.md - Overview\n")
-	builder.WriteString("2. lexer.md - Tokenization\n")
-	builder.WriteString("3. parser.md - Parsing\n")
-	builder.WriteString("4. expansion.md - Variable expansion\n")
-	builder.WriteString("5. execution.md - Command execution\n")
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "---" {
+			break
+		}
+		if strings.HasPrefix(line, "title:") {
+			meta.title = strings.TrimSpace(strings.TrimPrefix(line, "title:"))
+		}
+		if strings.HasPrefix(line, "description:") {
+			meta.description = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+		}
+		if strings.HasPrefix(line, "recommend_after:") {
+			meta.recommendAfter = strings.TrimSpace(strings.TrimPrefix(line, "recommend_after:"))
+		}
+	}
+
+	// Validate required fields
+	if meta.title == "" {
+		return nil, fmt.Errorf("%s: missing required 'title' in frontmatter", filename)
+	}
+	if meta.description == "" {
+		return nil, fmt.Errorf("%s: missing required 'description' in frontmatter", filename)
+	}
+	if len(meta.description) < 20 {
+		return nil, fmt.Errorf("%s: description must be at least 20 characters (got %d)", filename, len(meta.description))
+	}
+	if len(meta.description) > 250 {
+		return nil, fmt.Errorf("%s: description must be at most 250 characters (got %d)", filename, len(meta.description))
+	}
+
+	return meta, nil
+}
+
+// topoSort sorts files based on recommend_after dependencies
+func topoSort(metas []*fileMeta) ([]*fileMeta, error) {
+	// Build adjacency: file -> what comes after it
+	afterMap := make(map[string][]string)
+	metaMap := make(map[string]*fileMeta)
+	inDegree := make(map[string]int)
+
+	for _, m := range metas {
+		metaMap[m.file] = m
+		inDegree[m.file] = 0
+	}
+
+	for _, m := range metas {
+		if m.recommendAfter != "" {
+			if _, exists := metaMap[m.recommendAfter]; exists {
+				afterMap[m.recommendAfter] = append(afterMap[m.recommendAfter], m.file)
+				inDegree[m.file]++
+			}
+		}
+	}
+
+	// Kahn's algorithm
+	var queue []string
+	for _, m := range metas {
+		if inDegree[m.file] == 0 {
+			queue = append(queue, m.file)
+		}
+	}
+	// Sort queue alphabetically for deterministic order among peers
+	sort.Strings(queue)
+
+	var result []*fileMeta
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		result = append(result, metaMap[curr])
+
+		var next []string
+		for _, after := range afterMap[curr] {
+			inDegree[after]--
+			if inDegree[after] == 0 {
+				next = append(next, after)
+			}
+		}
+		sort.Strings(next)
+		queue = append(queue, next...)
+	}
+
+	if len(result) != len(metas) {
+		return nil, fmt.Errorf("cycle detected in recommend_after dependencies")
+	}
+
+	return result, nil
+}
+
+const baseURL = "https://wow-look-at-my-code.github.io/foundation-shell-spec/"
+
+func generateLLMsTxt(outDir string, metas []*fileMeta) error {
+	var builder strings.Builder
+
+	builder.WriteString("Foundation Shell Specification\n\n")
+	builder.WriteString("Base URL: " + baseURL + "\n\n")
+	builder.WriteString("Documentation (recommended reading order):\n")
+
+	for i, meta := range metas {
+		builder.WriteString(fmt.Sprintf("  %d. %s - %s\n", i+1, meta.file, meta.description))
+	}
 
 	llmsPath := filepath.Join(outDir, "llms.txt")
 	return os.WriteFile(llmsPath, []byte(builder.String()), 0644)

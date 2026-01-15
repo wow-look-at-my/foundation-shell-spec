@@ -1,3 +1,9 @@
+---
+title: I/O Redirection Specification
+description: Input/output redirection operators, file descriptor handling, and redirection ordering.
+recommend_after: parser.md
+---
+
 # Foundation Shell I/O Redirection Specification
 
 This document is the authoritative specification for I/O redirection in Foundation Shell. All implementation behavior MUST conform to this specification.

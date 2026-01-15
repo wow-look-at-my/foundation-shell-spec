@@ -1,3 +1,9 @@
+---
+title: Diagnostic Output Specification
+description: Error message formatting, caret-based position indicators, and multi-error display.
+recommend_after: highlighting.md
+---
+
 # Foundation Shell Diagnostic Output Specification
 
 Version: 1.0

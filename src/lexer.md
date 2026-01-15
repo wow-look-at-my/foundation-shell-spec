@@ -1,3 +1,8 @@
+---
+title: Lexer Specification
+description: Tokenization rules, escape sequences, quote state tracking, and whitespace-based token separation.
+---
+
 # Lexer Specification
 
 ## 1. Overview

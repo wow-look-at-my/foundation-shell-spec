@@ -1,3 +1,9 @@
+---
+title: Parser Specification
+description: Parsing rules, AST structure, token classification, and command chain building.
+recommend_after: lexer.md
+---
+
 # Parser Specification
 
 This document defines the complete specification for Foundation Shell's parser component. The parser orchestrates lexer tokenization, expansion, token classification, and command chain building.
