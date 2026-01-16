@@ -86,7 +86,15 @@ func run(srcDir, outDir string) error {
 		return fmt.Errorf("generating llms.txt: %w", err)
 	}
 
-	fmt.Printf("\nGenerated %d files + llms.txt\n", len(sortedMetas))
+	// Generate README.md from template if it exists
+	readmeTmpl := filepath.Join(srcDir, "README.md.tmpl")
+	if _, err := os.Stat(readmeTmpl); err == nil {
+		if err := generateREADME(srcDir, outDir, sortedMetas); err != nil {
+			return fmt.Errorf("generating README.md: %w", err)
+		}
+	}
+
+	fmt.Printf("\nGenerated %d files + llms.txt + README.md\n", len(sortedMetas))
 	return nil
 }
 
@@ -270,4 +278,32 @@ func generateLLMsTxt(outDir string, metas []*fileMeta) error {
 
 	llmsPath := filepath.Join(outDir, "llms.txt")
 	return os.WriteFile(llmsPath, []byte(builder.String()), 0644)
+}
+
+func generateREADME(srcDir, outDir string, metas []*fileMeta) error {
+	tmplPath := filepath.Join(srcDir, "README.md.tmpl")
+	content, err := os.ReadFile(tmplPath)
+	if err != nil {
+		return err
+	}
+
+	// Build reading order list
+	var readingOrder strings.Builder
+	for i, meta := range metas {
+		readingOrder.WriteString(fmt.Sprintf("%d. [%s](%s)\n", i+1, meta.title, meta.file))
+	}
+
+	// Build file table
+	var fileTable strings.Builder
+	for _, meta := range metas {
+		fileTable.WriteString(fmt.Sprintf("| [%s](%s) | %s |\n", meta.file, meta.file, meta.description))
+	}
+
+	// Replace placeholders
+	result := string(content)
+	result = strings.ReplaceAll(result, "{{READING_ORDER}}", strings.TrimSpace(readingOrder.String()))
+	result = strings.ReplaceAll(result, "{{FILE_TABLE}}", strings.TrimSpace(fileTable.String()))
+
+	readmePath := filepath.Join(outDir, "README.md")
+	return os.WriteFile(readmePath, []byte(result), 0644)
 }

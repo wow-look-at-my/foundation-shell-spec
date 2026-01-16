@@ -772,11 +772,3 @@ echo "Hello, Bob" /home/alice/docs $(pwd) $HOME
 | `/go/internal/lexer/lexer_test.go` | Lexer tests |
 | `/go/pkg/parser/parser.go` | Integration of expansion into parsing |
 | `/go/internal/chain/chain.go` | Command substitution executor |
-
----
-
-## Version History
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2024-01-12 | Initial specification |

@@ -37,19 +37,25 @@ No spec for builtin commands referenced in execution.md.
 Two tokenization systems not clearly distinguished.
 
 ## Issue 6: Go Code in Spec
-**Status:** PENDING
+**Status:** RESOLVED
 **Severity:** Low
 
 Specs contain Go-specific implementation code.
 
+**Resolution:** No change needed. Go code serves as reference implementation examples and doesn't need to be converted to pseudocode.
+
 ## Issue 7: Missing Reading Order
-**Status:** PENDING
+**Status:** RESOLVED
 **Severity:** Low
 
 No guidance on spec reading order or dependencies.
 
+**Resolution:** README.md is now generated from a template with recommended reading order derived from frontmatter. Reading order appears in both llms.txt and README.md.
+
 ## Issue 8: Inconsistent Version History
-**Status:** PENDING
+**Status:** RESOLVED
 **Severity:** Low
 
 Some specs have version history, others don't.
+
+**Resolution:** Removed version history sections. Git tracks history; version sections in docs add maintenance burden.
