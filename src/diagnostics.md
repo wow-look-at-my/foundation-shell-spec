@@ -254,6 +254,8 @@ The parser reports these exact strings (the `<...>` placeholders are filled with
 | Redirection-only command (no words) | `empty command` |
 | Redirection at end of input | `missing redirection target: <op>` |
 | Redirection followed by an operator | `missing redirection target: <op> followed by operator <op2>` |
+| Redirection target empty after expansion | `empty redirection target` |
+| Unquoted redirection target starting with `&` | `file descriptor duplication is not supported: <word>` |
 | Lexer failure (wrapped) | `tokenization error: <lexer error>` |
 | Substitution failure (wrapped) | `command substitution error: <error>` |
 

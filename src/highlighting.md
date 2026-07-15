@@ -339,9 +339,9 @@ echo $(unclosed              # TypeError (unbalanced parens)
 **Definition:** Variable references.
 
 **Recognition Rules:**
-- A `$` starts a variable token ONLY when the next character is a letter (a-z, A-Z), an underscore, or `{`: `$VAR`, `$_var`, `${HOME}`
+- A `$` starts a variable token ONLY when the next character is a letter (a-z, A-Z), an underscore, `{`, or `?`: `$VAR`, `$_var`, `${HOME}`, and the special parameter `$?` (expansion.md §Special Parameters)
 - `$(` starts a command substitution instead (§3.9)
-- Any other `$` (followed by a digit, punctuation, whitespace, or end of input) is a literal character within the word — `$?`, `$1`, `$-foo`, and a trailing `$` are NOT variables
+- Any other `$` (followed by a digit, punctuation, whitespace, or end of input) is a literal character within the word — `$1`, `$-foo`, and a trailing `$` are NOT variables
 
 **Context Rules:**
 - Variables are NOT expanded inside single quotes
@@ -354,7 +354,8 @@ echo $HOME               # "$HOME" is TypeVariable
 echo ${HOME}             # "${HOME}" is TypeVariable
 echo $PATH/bin           # "$PATH/bin" is TypeVariable (entire token)
 echo '$HOME'             # "'$HOME'" is TypeSingleQuotedString (not variable)
-echo $?                  # "$?" is TypeArgument ($ + ? cannot start a name)
+echo $?                  # "$?" is TypeVariable (special parameter)
+echo $1                  # "$1" is TypeArgument ($ + digit cannot start a name)
 ```
 
 ### 3.11 TypeParenGroup

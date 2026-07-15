@@ -151,9 +151,9 @@ For each token context:
 #### Expansion Order
 
 ```
-1. Tilde expansion      (~, ~/path)      - suppressed by WasQuoted
-2. Variable expansion   ($VAR, ${VAR})
-3. Command substitution ($(...), `...`) - only if executor provided
+1. Tilde expansion      (~, ~/path)          - suppressed by WasQuoted
+2. Variable expansion   ($VAR, ${VAR}, $?)
+3. Command substitution ($(...), `...`)     - only if executor provided
    (steps 1-3 all suppressed by WasSingleQuoted)
 4. Escape marker strip  (unconditional, every value token)
 ```
@@ -173,6 +173,8 @@ The `buildChain` function validates syntax and constructs the command chain.
 | Consecutive chain operators | `ErrConsecutiveOperators: <op1> followed by <op2>` |
 | Redirection without target | `ErrMissingRedirectionTarget: <operator>` |
 | Redirection followed by operator | `ErrMissingRedirectionTarget: <redir> followed by operator <op>` |
+| Redirection target empty after expansion | `ErrEmptyRedirectionTarget` (redirection.md §9.4) |
+| Unquoted redirection target starting with `&` | `ErrFdDuplicationUnsupported: <word>` (redirection.md §9.5) |
 
 The exact user-visible strings are pinned in diagnostics.md §5.2.
 
@@ -259,12 +261,14 @@ func parseOperator(s string) (token.TokenType, bool) {
 
 ```go
 var (
-    ErrEmptyInput              = errors.New("empty input")
-    ErrOperatorAtStart         = errors.New("unexpected operator at start")
+    ErrEmptyInput               = errors.New("empty input")
+    ErrOperatorAtStart          = errors.New("unexpected operator at start")
     ErrMissingRedirectionTarget = errors.New("missing redirection target")
-    ErrTrailingOperator        = errors.New("unexpected operator at end")
-    ErrConsecutiveOperators    = errors.New("consecutive operators")
-    ErrEmptyCommand            = errors.New("empty command")
+    ErrTrailingOperator         = errors.New("unexpected operator at end")
+    ErrConsecutiveOperators     = errors.New("consecutive operators")
+    ErrEmptyCommand             = errors.New("empty command")
+    ErrEmptyRedirectionTarget   = errors.New("empty redirection target")
+    ErrFdDuplicationUnsupported = errors.New("file descriptor duplication is not supported")
 )
 ```
 
@@ -436,10 +440,10 @@ Result: "echo <username>"  // $(whoami) executed and replaced
 ### Execution Model
 
 - Substitutions execute in the SAME process
-- Uses internal parser and chain executor
+- The body is re-parsed recursively with the same parser and executor (expansion.md §Recursive Execution)
 - Only stdout is captured
 - Trailing newlines are stripped
-- Exit code is available but typically unused in expansion
+- The substituted command's exit status is DISCARDED: it does not become `$?` and does not affect the surrounding command line (expansion.md §Failure Semantics)
 
 ### Nested Substitution
 
@@ -447,7 +451,7 @@ Result: "echo <username>"  // $(whoami) executed and replaced
 Input:  "echo $(echo $(whoami))"
 ```
 
-Substitutions are expanded from innermost to outermost.
+Nesting is handled by the recursive re-parse of the body: syntactically inner substitutions complete first, and substitution OUTPUT is never re-scanned (expansion.md §Single-Pass Expansion).
 
 ## Integration with Lexer
 
@@ -465,8 +469,10 @@ The parser depends on the lexer for initial tokenization. Key properties preserv
 The parser uses three expansion functions:
 
 1. `expander.ExpandTilde(value)` - Expand `~` to HOME
-2. `expander.ExpandEnvironment(value)` - Expand `$VAR` and `${VAR}`
+2. `expander.ExpandEnvironment(value, lastStatus)` - Expand `$VAR`, `${VAR}`, and `$?`
 3. `expander.ExpandCommandSubstitution(value, executor)` - Expand `$(...)` and backticks
+
+`lastStatus` is the shell's last recorded command-line status, supplied to the parser for every parse so that `$?` can expand (expansion.md §Special Parameters; execution.md §Last Exit Code).
 
 ## Semantic Classification
 

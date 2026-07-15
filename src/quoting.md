@@ -841,24 +841,11 @@ Command substitution:
 output = strings.TrimRight(output, "\n")
 ```
 
-### 10.3 Innermost-First Processing
+### 10.3 Innermost-First Through Recursion
 
-Nested substitutions are processed from innermost to outermost:
+Nested substitutions complete innermost-first as a CONSEQUENCE of recursion, not of textual re-scanning: the substitution body is re-parsed with the same parser and executor, so substitutions inside the body expand during that recursive parse (expansion.md §Recursive Execution).
 
-```go
-// Keep expanding until no more substitutions are found.
-// This naturally handles nesting by processing innermost first.
-for {
-    dollarStart, dollarEnd, dollarCmd := findInnermostDollarParen(result)
-    backtickStart, backtickEnd, backtickCmd := findInnermostBacktick(result)
-
-    // If no substitutions found, we're done
-    if dollarStart == -1 && backtickStart == -1 {
-        break
-    }
-    // ... execute and replace
-}
-```
+Substitution OUTPUT is never re-scanned for further substitutions — `$(...)` or backticks appearing in a command's output are literal text (expansion.md §Single-Pass Expansion).
 
 ### 10.4 Suppression by Single Quotes
 
@@ -874,12 +861,15 @@ Output: Mon Jan 12 10:30:00 UTC 2026
 
 ### 10.5 Balanced Parentheses
 
-The `$()` syntax requires balanced parentheses. The scan operates on runes:
+The `$()` syntax requires balanced parentheses, counted with the BODY's own quote state (lexer.md §7.1 rule 4): a `(` or `)` inside an open single-quote, double-quote, or backtick region of the body — or backslash-escaped — does not count. The scan operates on runes:
 
 ```go
+// Quote-state aware: parens inside quoted body regions and escaped
+// parens are skipped (lexer.md §7.1 rule 4)
 func findMatchingParen(runes []rune, startIdx int) int {
     depth := 1
     for i := startIdx; i < len(runes); i++ {
+        // ... skip escaped runes and track the body's quote depths ...
         switch runes[i] {
         case '(':
             depth++
@@ -893,6 +883,8 @@ func findMatchingParen(runes []rune, startIdx int) int {
     return -1  // Not found
 }
 ```
+
+This is what makes `echo $(echo ")")` valid: the quoted `)` is body content, not a closing delimiter (§10.1 rule 8).
 
 ---
 
@@ -1161,10 +1153,9 @@ func Analyze(input string) *AnalysisResult
 // Tokenization
 func Tokenize(input string) ([]TokenContext, error)
 
-// Expansion
-func Expand(token string, wasSingleQuoted bool) string
-func ExpandEnvironment(token string) string
+// Expansion (pipeline and suppression flags: expansion.md §Expansion Order)
 func ExpandTilde(token string) string
+func ExpandEnvironment(token string, lastStatus int) string
 func ExpandCommandSubstitution(token string, executor SubstitutionExecutor) (string, error)
 
 // Utilities

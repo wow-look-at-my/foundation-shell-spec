@@ -49,7 +49,14 @@ command_1  operator_1  command_2  operator_2  ...  command_N
 
 - An exit code of `0` indicates **success**
 - Any non-zero exit code indicates **failure**
-- The exit code range is 0-255 (standard Unix convention)
+- The exit code range is 0-255 (standard Unix convention; normative table in execution.md §Exit Codes)
+
+A command that fails to START — command not found (127), found but not executable (126), redirection target that fails to open (1) — yields its failure status to operator evaluation like any other non-zero exit. It NEVER aborts the chain (execution.md §Runtime Failures Never Abort the Chain):
+
+```bash
+nosuchcmd || echo fallback   # prints fallback; exit status 0
+nosuchcmd ; echo next        # prints next
+```
 
 ---
 
@@ -325,19 +332,20 @@ echo "a" ; echo "b" ; echo "c"
 # All three execute in order
 ```
 
-### Distinction from Newlines
+### Newlines Are Equivalent Separators
 
-In Foundation Shell, both `;` and newlines act as command separators, but:
-
-- Newlines: Each line is parsed and executed independently
-- Semicolon: Multiple commands on the same line, parsed together
+An unquoted newline at depth 0 is lexed as a soft `;` (lexer.md §3.4): within one parsed input, `echo a ; echo b` and `echo a` ⏎ `echo b` build the SAME chain.
 
 ```bash
-# Equivalent behavior:
+# Equivalent behavior (one parsed input):
 echo a ; echo b
 echo a
 echo b
 ```
+
+- Interactive mode reads one LINE at a time, so each line is a separate parse and newlines never reach the lexer
+- Non-interactive input — scripts, piped stdin, `fsh-exec` strings — is parsed as ONE input in which newlines separate commands (execution.md §Non-Interactive Mode)
+- After a chain operator a newline is a CONTINUATION, not a separator: `cmd1 &&` ⏎ `cmd2` behaves exactly like `cmd1 && cmd2` (lexer.md §3.4)
 
 ### Use Cases
 
@@ -642,47 +650,58 @@ const (
 
 ### Execution Algorithm
 
+The decision whether a segment runs is made BEFORE executing it, from the operator that PRECEDES it and the current propagated status. A skipped segment preserves `lastStatus` unchanged, so the operator after a skipped segment is evaluated against the ORIGINAL status — `false && a && b` runs nothing and returns 1; `true || a || b` runs nothing and returns 0.
+
 ```
 function ExecuteChain(chain):
+    lastStatus = 0
     i = 0
     while i < len(chain.Commands):
-        // Find extent of current pipeline
+        // Find extent of the current pipeline segment
         pipelineEnd = i
         while pipelineEnd < len(chain.Operators) and chain.Operators[pipelineEnd] == Pipe:
             pipelineEnd++
 
-        // Execute pipeline (commands[i] through commands[pipelineEnd])
-        pipelineCommands = chain.Commands[i : pipelineEnd+1]
-        exitCode = ExecutePipeline(pipelineCommands)
+        // The operator PRECEDING this segment decides whether it runs,
+        // evaluated against the CURRENT lastStatus
+        run = true
+        if i > 0:
+            switch chain.Operators[i-1]:
+                case And:       run = (lastStatus == 0)
+                case Or:        run = (lastStatus != 0)
+                case Semicolon: run = true
 
-        // Move past this pipeline
+        if run:
+            pipelineCommands = chain.Commands[i : pipelineEnd+1]
+            lastStatus = ExecutePipeline(pipelineCommands)
+        // else: segment SKIPPED - lastStatus is PRESERVED, and the next
+        // iteration evaluates the following operator against it
+
+        // Move past this pipeline segment
         i = pipelineEnd + 1
 
-        // Handle logical operator after pipeline
-        if pipelineEnd < len(chain.Operators):
-            op = chain.Operators[pipelineEnd]
-            switch op:
-                case And:
-                    if exitCode != 0:
-                        skip next pipeline
-                case Or:
-                    if exitCode == 0:
-                        skip next pipeline
-                case Semicolon:
-                    continue unconditionally
+    return lastStatus
+```
 
-    return exitCode
+Worked example — `false && echo a && echo b`:
+
+```
+Segment 1: false            runs (first segment)      -> lastStatus = 1
+Segment 2: echo a           preceded by && , status 1 -> SKIPPED, lastStatus stays 1
+Segment 3: echo b           preceded by && , status 1 -> SKIPPED, lastStatus stays 1
+Result: no output, exit status 1
 ```
 
 ### Pipeline Execution
 
-Pipelines execute all commands concurrently:
+Pipelines execute all commands concurrently (mechanics canonical in execution.md §Pipeline Execution):
 
 1. Create pipes between adjacent commands
 2. Launch all commands in goroutines
 3. Connect stdout[i] to stdin[i+1] via pipes
-4. Wait for all commands to complete
-5. Return exit code of rightmost command
+4. When a command finishes, close BOTH of its pipe ends — an early-exiting consumer terminates its producer (`yes | head -1` must not hang)
+5. Wait for all commands to complete
+6. Return exit code of rightmost command
 
 ### Thread Safety
 
