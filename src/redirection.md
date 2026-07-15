@@ -6,7 +6,9 @@ recommend_after: parser.md
 
 # Foundation Shell I/O Redirection Specification
 
-This document is the authoritative specification for I/O redirection in Foundation Shell. All implementation behavior MUST conform to this specification.
+> **Canonical for:** I/O redirection — operators, targets and their expansion, file semantics, redirection error handling and messages. Redirection *tokenization* is specified in lexer.md §3.3; the expansion pipeline in expansion.md. The authority map lives in the README.
+
+Implementation: the foundation-shell repository; this specification is authoritative.
 
 ## 1. Overview
 
@@ -29,10 +31,10 @@ This specification covers:
 - Expansion in redirection targets
 - Error handling
 
-This specification does NOT cover:
+This specification does NOT cover (unsupported features):
 - Here-documents (`<<`)
 - Here-strings (`<<<`)
-- File descriptor duplication (`2>&1`, `>&2`)
+- File descriptor duplication (`2>&1`, `>&2`) — attempts are rejected with a dedicated parse error (§9.5); a FUTURE feature (§15)
 - Process substitution (`<(...)`, `>(...)`)
 - `/dev/null` or other special files (handled by the OS, not the shell)
 
@@ -238,16 +240,16 @@ This order ensures that:
 - Input files are available before command execution
 - Output destinations are established before any output is generated
 
-### 5.3 Last-Wins Semantics
+### 5.3 Last-Wins Semantics (Parse-Time)
 
-If the same file descriptor is redirected multiple times, the **last** redirection wins:
+If the same file descriptor is redirected multiple times, the **last** redirection wins — at PARSE time. Earlier targets are discarded before execution begins, so they are never opened:
 
 ```bash
 echo test > file1.txt > file2.txt
-# Only file2.txt receives output; file1.txt is created but empty
+# Only file2.txt receives output; file1.txt is NEVER created
 ```
 
-**Implementation Note:** The parser only stores a single target per redirection type (`InputFile`, `OutputFile`, `ErrorFile`). Multiple redirections to the same descriptor simply overwrite the previous value.
+The parser stores a single target per redirection type (`InputFile`, `OutputFile`, `ErrorFile`); a later redirection to the same descriptor overwrites the previous value. This is a documented deviation from POSIX shells, which open every redirection in order (bash creates — and truncates — `file1.txt`).
 
 ---
 
@@ -339,12 +341,14 @@ The first command in a pipeline can use input redirection:
 < data.txt grep pattern | sort | uniq
 ```
 
-Middle or end commands in a pipeline that use input redirection will have their stdin replaced, breaking the pipe connection:
+Middle or end commands in a pipeline that use input redirection have their stdin replaced, disconnecting them from the pipe:
 
 ```bash
 # WARNING: grep ignores pipe input, reads from file instead
 cmd1 | grep < search_terms.txt pattern
 ```
+
+The disconnected pipe's read end is closed immediately at wiring time, so the upstream producer terminates instead of blocking forever on a pipe nobody reads (execution.md §Early Exit Terminates Producers). The pipeline always completes.
 
 ---
 
@@ -392,71 +396,112 @@ echo "test" > /path/to/newdir/file.txt
 
 ## 9. Error Handling
 
-### 9.1 Input File Not Found
+Redirection produces two classes of errors: PARSE-time errors (§9.3–§9.5), which reject the whole input before anything runs, and RUNTIME open failures (§9.1–§9.2), which fail only the affected command — the rest of the chain continues per operator logic (execution.md §Runtime Failures Never Abort the Chain).
 
-**Condition:** Input redirection (`<`) references a non-existent file
+### 9.1 Runtime Open Failures
+
+**Condition:** A redirection target fails to open at execution time — input file missing, permission denied, unwritable path, missing parent directory.
 
 **Behavior:**
-- Command execution fails immediately
-- Exit code: 1
-- Error message format: `cannot open input file <filename>: <os error>`
+- The affected command does NOT execute
+- The command's exit status is 1, which feeds operator evaluation; the chain CONTINUES (`cat < /missing || echo recovered` prints `recovered`)
+- The message is printed to stderr in EXACTLY this format — no wrapper prefix (no `execution error:`), and the filename appears exactly once (the OS reason is unwrapped; no doubled `open <file>:` prefix):
 
-**Example:**
+```
+cannot open input file <filename>: <os reason>
+cannot open output file <filename>: <os reason>
+```
+
+`input` is used for `<`; `output` for `>`, `>>`, `2>`, and `2>>`.
+
+**Example transcript:**
 ```bash
 $ cat < nonexistent.txt
 cannot open input file nonexistent.txt: no such file or directory
+$ cat < nonexistent.txt || echo recovered
+cannot open input file nonexistent.txt: no such file or directory
+recovered
 ```
 
 ### 9.2 Permission Denied
 
-**Condition:** Insufficient permissions to read input file or write/create output file
+Permission failures are runtime open failures (§9.1) with the OS reason `permission denied`:
 
-**Behavior:**
-- Command execution fails immediately
-- Exit code: 1
-- Error message format: `cannot open input file <filename>: permission denied` or `cannot open output file <filename>: permission denied`
-
-**Example:**
 ```bash
 $ cat < /etc/shadow
 cannot open input file /etc/shadow: permission denied
+$ echo x > /etc/readonly.conf
+cannot open output file /etc/readonly.conf: permission denied
 ```
 
 ### 9.3 Missing Target After Operator
 
-**Condition:** Redirection operator appears without a following filename
+**Condition:** A redirection operator appears without a following filename token.
 
 **Syntax Errors:**
 ```bash
-command >           # Missing target
+command >           # End of input after operator
 command > |         # Operator instead of filename
 command > &&        # Operator instead of filename
-command >           # End of input
 ```
 
 **Behavior:**
-- Parse error (not execution error)
-- Error message: `missing redirection target: >`
+- Parse error (canonical strings in diagnostics.md §5.2): `missing redirection target: >` — or, when an operator follows, `missing redirection target: > followed by operator |`
 - No partial execution occurs
 
-### 9.4 Error Message Output
+### 9.4 Empty Target After Expansion
 
-Redirection errors are written to stderr (unless stderr itself is being redirected, in which case the error goes to the original stderr before redirection is applied).
+**Condition:** A redirection target token exists but expands to the EMPTY string (e.g. an unset variable, or a substitution with empty output).
 
-### 9.5 Error Codes
+**Behavior:**
+- Parse error: `empty redirection target`
+- Nothing on the line executes; the shell records status 1 (as for any parse error)
+- The redirection is NOT silently dropped — a redirection that was written must never vanish
 
-| Error Condition              | Exit Code |
-|-----------------------------|-----------|
-| Input file not found         | 1         |
-| Permission denied            | 1         |
-| Cannot create output file    | 1         |
-| Missing redirection target   | Parse error (no exit code) |
+```bash
+$ echo hi > $UNSET_VAR
+empty redirection target
+```
+
+(POSIX-shell counterpart: bash's `ambiguous redirect`.)
+
+### 9.5 File Descriptor Duplication Is Guarded
+
+**Condition:** An UNQUOTED target word begins with `&`.
+
+File descriptor duplication (`2>&1`, `>&2`) is a documented FUTURE feature (§15). Today `2>&1` lexes as the operator `2>` followed by the word `&1` (lexer.md §3.3), which would silently create a file named `&1`. To prevent that trap, the parser rejects it:
+
+**Behavior:**
+- Parse error: `file descriptor duplication is not supported: <word>`
+- The check inspects the target token AS WRITTEN (before expansion) and applies only when the token is unquoted (`WasQuoted == false`)
+- A QUOTED target is a legitimate filename: `echo x > '&1'` creates a file named `&1`
+
+```bash
+$ echo hi 2>&1
+file descriptor duplication is not supported: &1
+$ echo hi > '&1'      # OK: quoted - writes a file literally named &1
+```
+
+### 9.6 Error Message Output
+
+Runtime redirection errors are written to stderr — the ORIGINAL stderr if the failing redirection is `2>`/`2>>` itself (the error is reported before the redirection would have been applied).
+
+### 9.7 Error Summary
+
+| Error Condition | Class | Exit Status | Message |
+|-----------------|-------|-------------|---------|
+| Input file not found | Runtime | 1 (command only; chain continues) | `cannot open input file <name>: <os reason>` |
+| Permission denied | Runtime | 1 (command only; chain continues) | `cannot open input file <name>: permission denied` / `cannot open output file <name>: permission denied` |
+| Cannot create output file | Runtime | 1 (command only; chain continues) | `cannot open output file <name>: <os reason>` |
+| Missing redirection target | Parse | line rejected; shell records 1 | `missing redirection target: <op>` |
+| Empty target after expansion | Parse | line rejected; shell records 1 | `empty redirection target` |
+| Unquoted target starting with `&` | Parse | line rejected; shell records 1 | `file descriptor duplication is not supported: <word>` |
 
 ---
 
 ## 10. Expansion in Redirection Targets
 
-Redirection target filenames undergo the same expansion as command arguments.
+Redirection target filenames undergo the SAME expansion pipeline as command arguments — including command substitution (expansion.md is canonical for the pipeline; this section shows its application to targets).
 
 ### 10.1 Variable Expansion
 
@@ -492,6 +537,7 @@ echo "log" > ~/logs/app.log
 - `~/path` expands to `$HOME/path`
 - `~user` is NOT expanded (user-specific home directories not supported)
 - Tilde must be at the start of the token
+- Quoting ANY part of the target suppresses tilde expansion (`WasQuoted`, whole-token granularity — expansion.md §Tilde Expansion): `> "~/f.txt"` and `> ~/"f.txt"` both name a literal `~/f.txt`
 
 ### 10.3 Single Quotes Prevent Expansion
 
@@ -526,11 +572,24 @@ Backslash escapes prevent expansion of the following character:
 echo "test" > \$HOME/file.txt
 ```
 
-### 10.6 Expansion Order
+### 10.6 Command Substitution in Targets
 
-1. Tilde expansion (if token starts with `~`)
-2. Environment variable expansion (`$VAR`, `${VAR}`)
-3. Escape marker stripping (internal processing)
+Command substitution runs in redirection targets exactly as in arguments:
+
+```bash
+echo "log" > $(date +%F).log     # writes to e.g. 2026-07-15.log
+```
+
+### 10.7 Expansion Order
+
+The full pipeline of expansion.md §Expansion Order, applied to the target token:
+
+1. Tilde expansion (token starts with unquoted `~`; skipped when `WasQuoted`)
+2. Environment variable expansion (`$VAR`, `${VAR}`, `$?`)
+3. Command substitution (`$(...)`, `` `...` ``)
+4. Escape marker stripping (unconditional)
+
+A single-quoted target (`WasSingleQuoted`) skips steps 1–3 entirely (§10.3). After expansion, an empty result is a parse error (§9.4).
 
 ---
 
@@ -594,15 +653,17 @@ defer func() {
 
 ### 12.3 Builtin Commands
 
-Builtin commands (e.g., `cd`, `pwd`, `echo`, `exit`) respect redirections:
+Builtin commands (execution.md §Builtin Commands) respect redirections:
 
 ```bash
 # pwd output goes to file
 pwd > current_dir.txt
 
-# echo output goes to file
-echo "hello" > greeting.txt
+# export's environment listing goes to file
+export > environment.txt
 ```
+
+(`echo` is NOT a builtin — it is an external command, which naturally respects redirections too.)
 
 ---
 
@@ -678,8 +739,8 @@ Foundation Shell implements a subset of POSIX shell redirection. Notable omissio
 
 | Feature | POSIX | Foundation Shell |
 |---------|-------|------------------|
-| `2>&1` (duplicate fd) | Yes | No |
-| `>&2` (stdout to stderr) | Yes | No |
+| `2>&1` (duplicate fd) | Yes | No — guarded parse error (§9.5) |
+| `>&2` (stdout to stderr) | Yes | No — guarded parse error (§9.5) |
 | `&>` (stdout+stderr) | Bash extension | No |
 | `<<` (here-document) | Yes | No |
 | `<<<` (here-string) | Bash extension | No |
@@ -710,23 +771,6 @@ input_redir     = '<' WORD
 output_redir    = '>' WORD | '>>' WORD
 error_redir     = '2>' WORD | '2>>' WORD
 
-WORD            = expanded_token
-expanded_token  = (after tilde and variable expansion)
+WORD            = a value token, non-empty after the full expansion
+                  pipeline (§10.7); must not start with unquoted '&' (§9.5)
 ```
-
-## Appendix B: Implementation Files
-
-| File | Purpose |
-|------|---------|
-| `internal/token/tokentype.go` | Token type definitions for redirection operators |
-| `pkg/parser/parser.go` | Parsing logic, CommandSpec construction |
-| `internal/command/command.go` | Execution with I/O redirection |
-| `internal/expander/expander.go` | Variable and tilde expansion |
-| `internal/lexer/lexer.go` | Tokenization of input |
-
-## Appendix C: Test Coverage
-
-Redirection behavior is verified by tests in:
-- `pkg/parser/parser_test.go` - Parsing tests
-- `internal/command/command_test.go` - Execution tests
-- `internal/chain/chain_test.go` - Pipeline integration tests
