@@ -61,7 +61,7 @@ Both exist because their jobs pull in opposite directions — execution wants cl
 | [index.html](index.html) | Pages root redirect to `llms.txt` |
 | [.github/workflows/](.github/workflows/) | `validate.yml` (build + GitHub Pages deploy from master), Claude review workflows |
 
-Executable conformance tests (BATS) live in the implementation repository at `spec/tests/`, where CI runs them against the built shell.
+Executable conformance tests (BATS) live in the implementation repository at `tests/`, where CI runs them against the built shell. The implementation consumes this repository as a pinned git submodule at `spec/` — the pin records exactly which spec commit the implementation targets.
 
 ## Building
 
