@@ -6,6 +6,8 @@ recommend_after: lexer.md
 
 # Parser Specification
 
+> **Canonical for:** token classification, chain building, parse-time validation, and the Chain/CommandSpec structures. The authority map lives in the README.
+
 This document defines the complete specification for Foundation Shell's parser component. The parser orchestrates lexer tokenization, expansion, token classification, and command chain building.
 
 ## Overview
@@ -126,28 +128,34 @@ ErrEmptyInput
 For each token context:
 
 1. **Check for Operator**
-   - If the token is an operator (`|`, `&&`, `||`, `;`, `<`, `>`, `>>`, `2>`, `2>>`), classify it directly
+   - If the lexer marked the token `IsOperator: true`, map its `Content` to the operator token type (see Operator Detection below)
+   - The parser consults ONLY the lexer's operator marking — it NEVER re-derives operators from content. A token whose content is `|` but whose `IsOperator` is `false` (because it was quoted or escaped) is an ordinary value token:
+     - `echo "|"` → `Args: ["echo", "|"]` (literal pipe argument, no pipeline)
+     - `echo '>'` → `Args: ["echo", ">"]` (literal argument, no redirection)
    - Operators are NOT expanded
    - Chain operators (`|`, `&&`, `||`, `;`) reset `isFirstInCommand` to `true`
 
 2. **Expand Value Tokens**
-   - Skip expansion for single-quoted tokens (`WasSingleQuoted == true`)
-   - Apply tilde expansion
+   - Skip all expansion for single-quoted tokens (`WasSingleQuoted == true`)
+   - Apply tilde expansion (skipped when `WasQuoted == true`)
    - Apply environment variable expansion
    - Apply command substitution (if executor provided)
-   - Strip escape markers
 
-3. **Classify as Command or Argument**
+3. **Strip Escape Markers**
+   - UNCONDITIONALLY, for every value token — including single-quoted tokens (a concatenation like `'a'\$HOME` carries a marker inside a `WasSingleQuoted` token). This step is NOT part of the expansion block that `WasSingleQuoted` skips
+
+4. **Classify as Command or Argument**
    - If `isFirstInCommand == true`: classify as `Command`, set flag to `false`
    - Otherwise: classify as `CommandArgument`
 
 #### Expansion Order
 
 ```
-1. Tilde expansion      (~, ~/path)
+1. Tilde expansion      (~, ~/path)      - suppressed by WasQuoted
 2. Variable expansion   ($VAR, ${VAR})
 3. Command substitution ($(...), `...`) - only if executor provided
-4. Escape marker strip  (remove internal markers)
+   (steps 1-3 all suppressed by WasSingleQuoted)
+4. Escape marker strip  (unconditional, every value token)
 ```
 
 ### Step 3: Chain Building
@@ -160,11 +168,30 @@ The `buildChain` function validates syntax and constructs the command chain.
 |------|-------|
 | Empty token list | `ErrEmptyInput` |
 | Chain operator at start | `ErrOperatorAtStart: <operator>` |
-| Empty command (no args) | `ErrEmptyCommand` |
-| Trailing operator | `ErrTrailingOperator: <operator>` |
+| Empty command (no args — e.g. redirection-only input `> file`) | `ErrEmptyCommand` |
+| Trailing chain operator other than `;` | `ErrTrailingOperator: <operator>` |
 | Consecutive chain operators | `ErrConsecutiveOperators: <op1> followed by <op2>` |
 | Redirection without target | `ErrMissingRedirectionTarget: <operator>` |
 | Redirection followed by operator | `ErrMissingRedirectionTarget: <redir> followed by operator <op>` |
+
+The exact user-visible strings are pinned in diagnostics.md §5.2.
+
+#### Trailing Semicolon
+
+A trailing `;` is VALID. The parser CONSUMES it: it does not appear in `Chain.Operators`, so the invariant `len(Operators) == len(Commands) - 1` is preserved.
+
+```
+Input:  "echo hi ;"
+Output: Chain{
+    Commands: [
+        &CommandSpec{Args: ["echo", "hi"]}
+    ],
+    Operators: []
+}
+// The trailing ; is consumed and has no effect
+```
+
+Trailing `|`, `&&`, and `||` remain errors — they require a right operand.
 
 #### Redirection at Start
 
@@ -206,7 +233,10 @@ Redirection operators modify I/O streams.
 
 ### Operator Detection
 
+Operator detection applies ONLY to tokens the lexer marked `IsOperator: true` (see Step 2 above). For those tokens, the content-to-type mapping is:
+
 ```go
+// Called only for tokens with IsOperator == true
 func parseOperator(s string) (token.TokenType, bool) {
     switch s {
     case "|":  return token.Pipe, true
@@ -248,6 +278,8 @@ command substitution error: <error>
 <error>: <context>
 ```
 
+The canonical, exact user-visible strings live in diagnostics.md §5.2.
+
 ### Error Examples
 
 ```
@@ -287,8 +319,10 @@ Parses input without command substitution expansion.
 ### ParseWithExecutor
 
 ```go
-func ParseWithExecutor(input string, executor expander.SubshellExecutor) (*Chain, error)
+func ParseWithExecutor(input string, executor expander.SubstitutionExecutor) (*Chain, error)
 ```
+
+(`SubstitutionExecutor` is the renamed `SubshellExecutor`; "subshell" is reserved for future `()` grouping.)
 
 Parses input with optional command substitution expansion.
 
@@ -422,7 +456,9 @@ The parser depends on the lexer for initial tokenization. Key properties preserv
 | Property | Usage |
 |----------|-------|
 | `Content` | Raw token value |
-| `WasSingleQuoted` | Skip expansion if true |
+| `WasSingleQuoted` | Skip all expansion if true |
+| `WasQuoted` | Skip tilde expansion if true |
+| `IsOperator` | Sole basis for operator classification |
 
 ## Integration with Expander
 
@@ -449,35 +485,40 @@ The classifier tracks state:
 ## Grammar (Informal)
 
 ```
-chain      := command (operator command)*
-command    := (redirection | word)+
-word       := COMMAND | ARGUMENT | QUOTED_STRING
-operator   := PIPE | AND | OR | SEMICOLON
+chain       := command (chain_op command)* [';']
+chain_op    := PIPE | AND | OR | SEMICOLON
+command     := redirection* word (word | redirection)*
 redirection := REDIR_OP word
-REDIR_OP   := '<' | '>' | '>>' | '2>' | '2>>'
+REDIR_OP    := '<' | '>' | '>>' | '2>' | '2>>'
+word        := any value token (lexer.md §2.3)
 ```
+
+Every command contains at least one word — the grammar itself excludes redirection-only commands (`> file`), which the validator reports as `ErrEmptyCommand`. The optional final `;` is the consumed trailing semicolon. `word` is a lexer value token (a `TokenContext` with `IsOperator: false`); there is no separate quoted-string token type — quoting is resolved by the lexer before classification.
 
 ## Testing Considerations
 
 ### Valid Inputs
 
-- Empty after whitespace strip → `ErrEmptyInput`
 - Single command
 - Multiple commands with pipes
 - Conditional operators (&&, ||)
 - Sequential execution (;)
+- Trailing semicolon (consumed; not in Chain.Operators)
 - Redirection combinations
 - Mixed operators
 - Quoted arguments (single and double)
+- Quoted/escaped operator characters as literal arguments (`echo "|"`)
 - Variable expansion
 - Tilde expansion
 
 ### Invalid Inputs
 
-- Operator at start (except redirection)
-- Trailing operator (except ;)
+- Empty or whitespace-only input → `ErrEmptyInput`
+- Chain operator at start (redirection at start is valid)
+- Trailing chain operator other than `;`
 - Consecutive chain operators
 - Redirection without target
+- Redirection-only command (`> file`) → `ErrEmptyCommand`
 - Malformed quotes (detected by lexer/analyzer)
 
 ### Edge Cases
