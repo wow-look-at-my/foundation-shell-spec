@@ -24,7 +24,7 @@ The **canonical authority map** — which file owns which topic — lives in [RE
 | `.github/workflows/` | `validate.yml` builds every push and deploys Pages from master; Claude review workflows |
 | `dist/` | Generated output (gitignored — never edit or commit it) |
 
-The executable conformance suite (BATS) lives in the **implementation repo** at `spec/tests/`, where CI runs it against the built shell. Do not add a copy here — it would drift.
+The executable conformance suite (BATS) lives in the **implementation repo** at `tests/`, where CI runs it against the built shell. Do not add a copy here — it would drift.
 
 ## Source File Conventions
 
