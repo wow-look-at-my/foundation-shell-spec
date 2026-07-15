@@ -439,7 +439,7 @@ error: missing redirection target
 
 **Input:** `echo 'hello`
 
-**Analysis:** The token starting at position 5 has an odd number of single quotes.
+**Analysis:** The token starting at position 5 contains a single-quote region that is still open at end of input (quoting.md §5.5).
 
 **Output:**
 ```
@@ -459,13 +459,13 @@ echo 'it
 error: unclosed single quote
 ```
 
-(Note: `echo 'it's` would be VALID — it contains two single quotes, an even count, and prints `its`.)
+(Note: `echo 'it's` would be VALID — the `'` in `it's` is attached to text on both sides, so it CLOSES the region (quoting.md §5.2); the command prints `its`. An even quote count alone proves nothing: `echo 'a 'b` has two quotes and is still unclosed, because the second one NESTS.)
 
 ### 8.4 Unclosed Double Quote
 
 **Input:** `echo "hello`
 
-**Analysis:** The token starting at position 5 has an odd number of double quotes.
+**Analysis:** The token starting at position 5 contains a double-quote region that is still open at end of input (quoting.md §5.5).
 
 **Output:**
 ```
@@ -489,7 +489,7 @@ error: unclosed double quote
 
 **Input:** ``echo `hello`` (the input is `echo`, a space, one backtick, `hello` — no backslash)
 
-**Analysis:** The token starting at position 5 has an odd number of backticks.
+**Analysis:** The token starting at position 5 contains a backtick substitution that is still open at end of input (quoting.md §5.5).
 
 **Output:**
 ~~~
