@@ -537,7 +537,7 @@ Arguments reach `export` fully expanded: `export A=$B` assigns `B`'s value, and 
 A command is a standalone assignment when ALL of the following hold:
 
 1. The command has exactly ONE word (redirections do not count as words)
-2. That word's token was fully unquoted (`WasQuoted == false`)
+2. No part of that word's token was single-quoted (`WasSingleQuoted == false`)
 3. The word's EXPANDED value matches `NAME=VALUE`, where `NAME` is a valid variable name and `VALUE` (everything after the first `=`) may be empty
 
 Effect: set the environment variable; status 0; no output.
@@ -547,15 +547,18 @@ A=hello          # sets A=hello, status 0
 A=               # sets A to the empty string
 A=$B             # sets A to B's value (expansion ran first)
 A=B=C            # sets A to "B=C" (first = splits)
-'A=B'            # NOT an assignment (quoted): runs a command named A=B -> 127
-A="B"            # NOT an assignment (whole-token WasQuoted - see below)
+A="B"            # sets A=B (double quotes do not block assignment)
+"A=B"            # sets A=B (double quotes do not block assignment)
+A="hello world"  # sets A to "hello world" (quotes make it one word)
+'A=B'            # NOT an assignment (single-quoted): runs a command named A=B -> 127
+A='B'            # NOT an assignment (whole-token WasSingleQuoted - see below)
 A=x cmd          # NOT an assignment (two words): runs a command named A=x -> 127
 1X=y             # NOT an assignment (invalid name): runs a command named 1X=y -> 127
 ```
 
 Notes — all deliberate:
 
-- **Whole-token quoting granularity**: the `WasQuoted` flag covers the whole token (expansion.md §Tilde Expansion documents the same granularity), so `A="hello world"` is NOT an assignment. To set a value containing spaces (or any quoted value), use `export A="hello world"` — `export` matches on the expanded argument and has no unquoted requirement
+- **Whole-token granularity**: the `WasSingleQuoted` flag covers the whole token (lexer.md §4.4.2), so a single-quoted part ANYWHERE in the word — `'A=B'`, `A='B'`, `'A'=B` — disqualifies the entire word from assignment recognition
 - **Recognition uses the expanded value**: an unquoted `$X` whose value is `A=B` IS an assignment (POSIX shells recognize assignments before expansion; documented deviation)
 - **Prefix assignments are NOT supported**: `VAR=x cmd` does not set `VAR` for `cmd`; it runs a command literally named `VAR=x` (typically 127). Per-command environment prefixes are a possible FUTURE feature
 - **Redirections on an assignment** are opened and closed with their usual side effects (creation/truncation); the assignment itself produces no output
