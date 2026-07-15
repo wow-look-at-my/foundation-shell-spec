@@ -1,12 +1,14 @@
 ---
 title: Quoting Specification
-description: Quote handling for single, double, and backtick quotes with depth tracking for nested constructs.
+description: Quote semantics for single, double, and backtick quotes, including the depth-tracked nesting rule — Foundation Shell's flagship non-POSIX feature.
 recommend_after: lexer.md
 ---
 
 # Quoting Specification
 
-> **Canonical for:** quote semantics (what quoting means for tokens and expansion), quote depth tracking, and the quote-isolation rules. For tokenization mechanics see lexer.md; the authority map lives in the README.
+> **Canonical for:** quote semantics (what quoting means for tokens and expansion), the quote nesting rule and depth tracking, and the quote-isolation rules. For tokenization mechanics see lexer.md; the authority map lives in the README.
+
+> **⚠️ NON-POSIX BEHAVIOR.** Foundation Shell quoting deliberately diverges from POSIX and from every sh-family shell: same-type quote characters can NEST inside an open quoted region (§5.2, §6). Some valid POSIX inputs are errors here, and some produce different arguments than a POSIX shell would (§13). Do not carry POSIX quoting idioms over unreviewed — in particular, `"label: "$VAR`-style concatenation is an unclosed-quote error here (§13.3).
 
 ## 1. Overview
 
@@ -43,13 +45,15 @@ Input String
   [PARSER] --> Command chain construction
 ```
 
-### 1.3 Two Analysis Systems
+### 1.3 Two Scanners, One Rule
 
-Foundation Shell has two complementary systems for handling quotes:
+Foundation Shell has two complementary scanners that handle quotes:
 
-1. **Syntax Analyzer** (`syntax/analyzer.go`): Performs depth-tracked quote validation for syntax highlighting and error detection. Uses even/odd count algorithm.
+1. **Syntax Analyzer** (highlighting.md): rune-based scanner for syntax highlighting and diagnostics. Preserves quote characters in token values and records positions and depths.
 
-2. **Lexer** (`lexer/lexer.go`): Performs actual tokenization with quote state tracking. Uses traditional toggle-based state machine.
+2. **Lexer** (lexer.md): the execution tokenizer. Removes outermost quote delimiters, processes escapes, and emits `TokenContext` values.
+
+Both implement the SAME quote-state semantics — the open/nest/close rule of §5.2 with the context rules of §5.3. An input is valid to one scanner iff it is valid to the other; the conformance suite cross-checks this (highlighting.md §7.1).
 
 ---
 
@@ -66,7 +70,8 @@ Single quotes provide **strong quoting** - the strongest form of literal text pr
 | **No Variable Expansion** | Dollar signs are literal: `'$HOME'` remains `$HOME` |
 | **No Command Substitution** | Backticks and `$()` are literal |
 | **Whitespace Preservation** | Spaces and tabs do not split tokens |
-| **Quote Removal** | The quote characters themselves are removed from output |
+| **Same-Type Nesting** | A `'` inside the region nests or closes by the §5.2 rule (§6.1) |
+| **Quote Removal** | The outermost quote pair is removed; nested quote characters remain literally (§6) |
 
 ### 2.2 Single Quote Behavior
 
@@ -84,13 +89,24 @@ Input:  echo 'back\\slash'
 Output: back\\slash     (literal double backslash)
 ```
 
-### 2.3 What Cannot Be Done
+### 2.3 Single Quotes Inside Single Quotes
 
-**A single quote cannot appear inside single quotes.** There is no escape mechanism within single quotes.
+Two mechanisms put a literal `'` inside a single-quoted argument:
+
+**1. Whitespace-delimited nesting (Foundation Shell extension — §6).** A `'` preceded by whitespace and followed by a non-whitespace, non-quote rune NESTS instead of closing (§5.2), and nested quote characters stay in the argument literally:
 
 ```
-# INVALID - Cannot include literal single quote
-echo 'it's broken'    # Syntax error or unexpected behavior
+Input:  echo 'it 'really' works'
+Output: it 'really' works
+```
+
+**2. The close–escape–reopen dance (POSIX-compatible — for attached apostrophes).** A `'` attached to non-whitespace text CLOSES the region, so an apostrophe inside a word cannot nest:
+
+```
+# ERROR - the ' in it's closes the region
+echo 'it's broken'    # error: unclosed single quote
+# Trace: OPEN at 'it, CLOSE at t' (previous rune not whitespace), "broken"
+# is then unquoted, and the final ' OPENs at depth 0 and never closes.
 
 # WORKAROUND - End quotes, add escaped quote, restart quotes
 echo 'it'\''s working'
@@ -98,8 +114,8 @@ echo 'it'\''s working'
 ```
 
 The workaround works by:
-1. `'it'` - single-quoted "it"
-2. `\'` - escaped single quote (outside single quotes)
+1. `'it'` - single-quoted "it" (the `'` after `t` closes: previous rune is not whitespace)
+2. `\'` - escaped single quote, outside single quotes (escapes never touch depth — §5.2)
 3. `'s working'` - single-quoted "s working"
 
 These concatenate into a single token: `it's working`
@@ -155,7 +171,8 @@ Double quotes provide **weak quoting** - whitespace preservation with selective 
 | **Command Substitution Allowed** | `$(cmd)` and `` `cmd` `` will be expanded |
 | **Tilde Expansion Suppressed** | Sets `WasQuoted`, which suppresses tilde expansion for the whole token |
 | **Single Quotes Literal** | Single quote character has no special meaning |
-| **Quote Removal** | The quote characters themselves are removed from output |
+| **Same-Type Nesting** | A `"` inside the region nests or closes by the §5.2 rule (§6.2) |
+| **Quote Removal** | The outermost quote pair is removed; nested quote characters remain literally (§6) |
 
 ### 3.2 Double Quote Behavior
 
@@ -191,6 +208,8 @@ Input:  echo "path is \"$HOME\""
 Output: path is "/home/user"
 ```
 
+Whitespace-delimited nesting is the escape-free alternative (§6.2): `echo "path is "$HOME" here"` keeps the nested pair literally.
+
 ### 3.5 Preventing Expansion
 
 To include a literal `$` that should not trigger expansion:
@@ -216,6 +235,7 @@ Backticks provide legacy command substitution syntax.
 | **Output Substitution** | Command output replaces the backtick expression |
 | **Trailing Newline Trimming** | Trailing newlines are removed from output |
 | **Not in Single Quotes** | Backticks inside single quotes are literal |
+| **Same-Type Nesting** | A backtick inside a backtick body nests or closes by the §5.2 rule; nested backticks execute recursively (§6.3) |
 
 ### 4.2 Backtick Behavior
 
@@ -239,206 +259,320 @@ Output: Today is `date`    (literal - single quotes)
 echo `date`
 echo $(date)
 
-# Nesting is cleaner with $()
-echo $(echo $(date))     # Easy
-echo `echo \`date\``     # Harder to read
+# Both nest without escaping: $() by explicit delimiters,
+# backticks by the nesting rule (§5.2, §6.3)
+echo $(echo $(date))
+echo `echo `date``
 ```
+
+`$(...)` remains the recommended syntax: its delimiters are visually unambiguous at any depth, while backtick nesting depends on the §5.2 neighbor conditions.
 
 ### 4.4 Backtick Depth Tracking
 
-The syntax analyzer tracks backtick depth for validation:
+Backtick state uses the same open/nest/close rule as the quote types (§5.2), applied when backticks are active (not inside single quotes — §5.3):
 
-```go
-if c == '`' && singleQuoteDepth == 0 {
-    if backtickDepth%2 == 0 {
-        // Opening backtick
-    } else {
-        // Closing backtick
-    }
-    backtickDepth++
-}
-```
+- **Depth 0:** a backtick always opens a substitution.
+- **Depth ≥ 1:** a backtick NESTS one level (whitespace before; non-whitespace, non-quote rune after) or CLOSES one level.
+- Nested backticks stay in the body literally and execute recursively when the body is re-parsed (§6.3; lexer.md §7.1).
 
-An odd backtick count at end of input indicates an unclosed backtick:
+A backtick region still open at end of input is the canonical error `unclosed backtick` (§5.5). With nesting, even an EVEN number of backticks can be unclosed:
 
 ```
 Input:  echo `date
-Error:  unclosed backtick (odd count)
+Error:  unclosed backtick
+
+Input:  echo `a `b
+Error:  unclosed backtick    (2 backticks: the 2nd NESTS — space before, b after)
 ```
+
+For a literal backtick *character*, escape it: `` \` `` is marked by the lexer and never treated as a delimiter (lexer.md §5.1). In Foundation Shell an escaped backtick is ALWAYS a literal character — it is never the POSIX-style nesting device (§6.3).
 
 ---
 
-## 5. Quote Depth Tracking
+## 5. Quote State Tracking
 
-Foundation Shell uses a sophisticated depth-tracking algorithm for quote validation.
+Foundation Shell tracks quote state with per-type depth counters driven by a single open/nest/close rule. This section is the **normative statement of the rule**; both scanners (§1.3) implement it identically.
 
-### 5.1 The Even/Odd Count Algorithm
+### 5.1 Per-Type Depth Counters
 
-For each quote type, the analyzer maintains a depth counter:
+Each quote type has an independent depth counter that counts how many regions of that type are currently open:
 
-- **Even count (0, 2, 4, ...)**: Valid - all quotes are balanced
-- **Odd count (1, 3, 5, ...)**: Invalid - unclosed quote
+| Counter | Driven by | Meaning when > 0 |
+|---------|-----------|------------------|
+| `singleQuoteDepth` | `'` | Inside (possibly nested) single-quote region(s) |
+| `doubleQuoteDepth` | `"` | Inside (possibly nested) double-quote region(s) |
+| `backtickDepth` | `` ` `` | Inside (possibly nested) backtick substitution(s) |
+| `parenDepth` | `$(` / `)` | Inside (possibly nested) `$(...)` substitution(s) |
+
+Depth 0 means no region of that type is open. Depths never go negative (rule 1 below). A quote character drives its counter only when it is unescaped and **active** in the current context (§5.3); each command-substitution body begins a fresh quote context (§5.3).
+
+`parenDepth` needs no special rule: `$(` and `)` are distinct delimiters, so `$(` always increments and a closing `)` (one not inside an open body quote region) always decrements. The rule below exists because the three quote types use the SAME character to open and close.
+
+### 5.2 The Open / Nest / Close Rule
+
+For an **unescaped, active** quote character of a given type, with `depth` = that type's current counter:
+
+1. **`depth == 0` → OPEN.** The character always opens a region of its type: depth becomes 1. Neighboring characters are irrelevant.
+2. **`depth >= 1` → NEST or CLOSE.** The character **nests** one level deeper (`depth+1`) **iff ALL of**:
+   - **(a)** the previous input rune is whitespace;
+   - **(b)** a next input rune exists and is not whitespace;
+   - **(c)** the next input rune is not any quote character (`'`, `"`, or `` ` ``).
+
+   Otherwise it **closes** one level (`depth-1`). The region ends when depth returns to 0.
+3. **Literal retention.** Nested quote characters — every transition that does not touch depth 0 — remain **literally** in the argument. Only the outermost pair (the 0→1 opener and the 1→0 closer) is removed as delimiters (§8.1). Inside command-substitution bodies, even the outermost pair is preserved verbatim for the recursive parse (lexer.md §7.1).
+4. **Textual neighbor test.** Conditions (a)–(c) examine the raw adjacent runes without interpreting them (a backslash counts as the rune `\`; an already-processed delimiter counts as its quote rune). "Whitespace" is the same class used for word splitting (lexer.md §3.1.1). The previous rune always exists at depth ≥ 1 (at minimum it is the opener).
+5. **Escapes are invisible to the rule.** Escaped quote characters (backslash escape or escape marker, lexer.md §5) are consumed by escape processing and never reach this rule (§7.5). They neither open, nest, nor close.
+
+Intuition: a quote character nests only when it *looks like it is opening an interior quoted phrase* — preceded by a space, immediately followed by visible content that is not itself a quote. Everything else — attached to text (`it's`), at a word or input end (`'a '`), or adjacent to another quote (`''`, the §12.6 interleave) — closes, exactly as in POSIX.
+
+#### 5.2.1 Decision Table
+
+For a same-type quote character at depth ≥ 1:
+
+| Previous rune | Next rune | Action | Why |
+|---------------|-----------|--------|-----|
+| whitespace | non-whitespace, non-quote | **NEST** (+1) | Reads as the start of an interior quoted phrase |
+| whitespace | whitespace | CLOSE (−1) | `echo 'a ' b` — a terminator |
+| whitespace | none (end of input) | CLOSE (−1) | `echo 'a '` — a terminator |
+| whitespace | `'`, `"`, or `` ` `` | CLOSE (−1) | Adjacent quotes mean POSIX-style close-and-reopen concatenation (`'a '' b'`, §12.6) |
+| non-whitespace | (anything) | CLOSE (−1) | `it's`, `'a'b`, `''` — attached quotes close |
+
+At depth 0 the character always OPENS, whatever its neighbors.
+
+#### 5.2.2 Reference Algorithm
+
+Rune-based pseudocode shared by both scanners (the analyzer keeps every character and records positions; the lexer additionally strips outermost delimiters — lexer.md §10.2):
 
 ```go
-// Single quote depth tracking
-if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 {
-    if singleQuoteDepth%2 == 0 {
-        // Opening quote - depth goes 0->1, 2->3, etc.
-        quoteStarts = append(quoteStarts, a.pos)
-    } else {
-        // Closing quote - depth goes 1->2, 3->4, etc.
-        if len(quoteStarts) > 0 {
-            quoteStarts = quoteStarts[:len(quoteStarts)-1]
-        }
+type Action int
+
+const (
+    Open Action = iota
+    Nest
+    Close
+)
+
+// quoteAction decides what one unescaped, ACTIVE quote character at rune
+// index i does. depth is the current counter of that quote type in the
+// current context.
+func quoteAction(input []rune, i, depth int) Action {
+    if depth == 0 {
+        return Open // rule 1: depth 0 always opens
     }
-    singleQuoteDepth++
+    prevIsSpace := unicode.IsSpace(input[i-1]) // depth >= 1 implies i >= 1
+    nextExists := i+1 < len(input)
+    nextIsSpace := nextExists && unicode.IsSpace(input[i+1])
+    nextIsQuote := nextExists &&
+        (input[i+1] == '\'' || input[i+1] == '"' || input[i+1] == '`')
+    if prevIsSpace && nextExists && !nextIsSpace && !nextIsQuote {
+        return Nest // rule 2: depth+1; the character stays in the argument
+    }
+    return Close // rule 2: depth-1; region ends when depth returns to 0
 }
 ```
 
-### 5.2 Depth Counter Behavior
-
-| Single Quote | Depth | State |
-|--------------|-------|-------|
-| (start) | 0 | Outside |
-| `'` | 1 | Inside |
-| `'` | 2 | Outside (one pair complete) |
-| `'` | 3 | Inside (second pair started) |
-| `'` | 4 | Outside (two pairs complete) |
-
-### 5.3 Quote Isolation Rules
-
-Quotes are isolated from each other based on nesting context:
-
-| Context | Quote Behavior |
-|---------|---------------|
-| Single quotes active | Double quotes and backticks are literal |
-| Double quotes active | Single quotes are literal, backticks active |
-| Backticks active | Single quotes are literal, double quotes active |
+Applying it (single quotes shown; double quotes and backticks are identical in shape):
 
 ```go
-// Single quotes only active when NOT in double quotes or backticks
-if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 { ... }
-
-// Double quotes only active when NOT in single quotes or backticks
-if c == '"' && singleQuoteDepth == 0 && backtickDepth == 0 { ... }
-
-// Backticks only active when NOT in single quotes
-if c == '`' && singleQuoteDepth == 0 { ... }
+if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 { // active? (§5.3)
+    switch quoteAction(input, i, singleQuoteDepth) {
+    case Open, Nest:
+        singleQuoteDepth++
+        openPos = append(openPos, i) // region starts, for unclosed-error spans
+    case Close:
+        singleQuoteDepth--
+        openPos = openPos[:len(openPos)-1]
+    }
+}
 ```
 
-### 5.4 Outside Quotes Detection
+Whether the character is emitted or stripped depends on the transition: the lexer strips only the outermost delimiters (Open from 0 and Close to 0, outside substitution bodies) and keeps nested quote characters in the token (lexer.md §10.2).
 
-A position is "outside all quotes" when all depth counters have even values:
+### 5.3 Quote Isolation and Context Rules
+
+Within an open quote region, only SAME-TYPE quote characters are subject to the §5.2 rule. Different-type quote characters are literal content — with one exception: command substitutions stay active inside double quotes:
+
+| Open region | `'` | `"` | `` ` `` | `$(` |
+|-------------|-----|-----|---------|------|
+| Single-quote region | same-type rule (§5.2) | literal | literal | literal |
+| Double-quote region | literal | same-type rule (§5.2) | active (opens a substitution) | active (opens a substitution) |
+
+**Command-substitution bodies** (`$(...)` and backticks) each begin a **fresh quote context**: the enclosing depths are saved and restored when the body closes, and the body's quote characters are preserved verbatim in the token while still being TRACKED — with this same rule — for delimiter purposes (lexer.md §7.1):
+
+- Inside a `$(...)` body, `'` and `"` drive the body context's own counters; a `)` closes the innermost `$(` only when the body context has no open quote region and no open backtick.
+- Inside a backtick body, single quotes are literal; double quotes update the body context's counter but never prevent the body from closing; an unescaped backtick nests or closes the body by §5.2.
+- When the substitution executes, the body is re-parsed recursively from scratch, so the delimiter the scanner chose is exactly the delimiter the recursive parse sees.
+
+### 5.4 Word Boundaries: Total Depth
+
+The total depth is the sum of all four counters in the current context. Unquoted whitespace splits words **only at total depth 0**:
 
 ```go
-outsideQuotes := singleQuoteDepth%2 == 0 &&
-                 doubleQuoteDepth%2 == 0 &&
-                 backtickDepth%2 == 0 &&
-                 parenDepth == 0
+totalDepth := singleQuoteDepth + doubleQuoteDepth + backtickDepth + parenDepth
+// whitespace is a word boundary iff totalDepth == 0
 ```
 
-This is used to determine:
-- Whether whitespace terminates a token
-- Whether operators are recognized
-- Whether the input is syntactically complete
+The same condition gates operator recognition (lexer.md §3.2, §10.2). Whitespace inside any open region — including nested levels — is content.
 
 ### 5.5 Validation at End of Input
 
-At end of input, all depths must be even:
+At end of input every counter must be 0. Any counter still positive reports the canonical error for its type (diagnostics.md §5):
 
 ```go
-if singleQuoteDepth%2 != 0 {
-    errors = append(errors, "unclosed single quote (odd count)")
+if singleQuoteDepth > 0 {
+    errors = append(errors, "unclosed single quote")
 }
-if doubleQuoteDepth%2 != 0 {
-    errors = append(errors, "unclosed double quote (odd count)")
+if doubleQuoteDepth > 0 {
+    errors = append(errors, "unclosed double quote")
 }
-if backtickDepth%2 != 0 {
-    errors = append(errors, "unclosed backtick (odd count)")
+if backtickDepth > 0 {
+    errors = append(errors, "unclosed backtick")
 }
 if parenDepth > 0 {
-    errors = append(errors, "unclosed subshell $(...)")
+    errors = append(errors, "unclosed command substitution $(...)")
 }
 ```
+
+Two consequences of the nesting rule, spelled out because they differ from parity-based models:
+
+- **An EVEN quote count can be unclosed.** `echo 'a 'b` contains two single quotes, yet the second one NESTS (whitespace before, `b` after), so depth ends at 2 → `unclosed single quote`. This is exactly why the canonical error strings carry no "(odd count)" suffix.
+- **An odd quote count is always unclosed.** Every quote character changes its counter by ±1, so returning to 0 needs an even number of them. The converse does not hold — validity is a depth check, never a parity check.
 
 ---
 
 ## 6. Nested Quotes
 
-Foundation Shell supports sophisticated nested quote handling through depth tracking.
+Depth-tracked quote nesting is Foundation Shell's flagship non-POSIX feature: a same-type quote pair can appear INSIDE an open quoted region, delimited by the neighbor conditions of §5.2, and the nested quote characters stay in the argument literally. This section shows the rule in action; the normative statement is §5.2. For what nesting buys — and costs — relative to POSIX, see §13.
 
 ### 6.1 Nested Single Quotes
 
-Multiple pairs of single quotes can appear in a single word:
-
 ```
 Input:  echo 'outer 'inner' end'
-Depth:       1      2      1    0
-
-# This is VALID because:
-# - 4 single quotes total (even count)
-# - Final depth is 0
 ```
 
-**Note**: This behavior differs from traditional shells where `'outer 'inner' end'` would be parsed differently.
+| Quote | Prev rune | Next rune | Action (§5.2) | Depth after |
+|-------|-----------|-----------|---------------|-------------|
+| 1st `'` | space | `o` | depth 0 → OPEN | 1 |
+| 2nd `'` | space | `i` | whitespace before; non-space, non-quote after → NEST | 2 |
+| 3rd `'` | `r` | space | previous rune not whitespace → CLOSE | 1 |
+| 4th `'` | `d` | (end) | previous rune not whitespace → CLOSE | 0 |
+
+Result: ONE argument. The nested pair stays literally; the outermost pair is stripped:
+
+```
+Tokens: [{Content: "echo"},
+         {Content: "outer 'inner' end", WasSingleQuoted: true, WasQuoted: true}]
+Output: outer 'inner' end
+```
+
+The interior whitespace does not split the word: total depth (§5.4) never returns to 0 inside the region.
+
+Nesting is not limited to one level:
+
+```
+Input:  echo 'l1 'l2 'l3' l2' l1'
+Depths:      1   2   3  2   1   0
+Result: one argument: l1 'l2 'l3' l2' l1
+```
+
+(The 2nd and 3rd quotes NEST — whitespace before, letters after. The 4th–6th CLOSE — each has a non-whitespace rune before it.)
+
+#### 6.1.1 POSIX-Identical Anchors
+
+The neighbor conditions deliberately make the common POSIX patterns behave exactly as POSIX does — attached closers, adjacent pairs, empty strings:
+
+| Input | Trace (§5.2) | Result |
+|-------|--------------|--------|
+| `echo 'a' 'b'` | 2nd `'` prev=`a` → CLOSE; 3rd at depth 0 → OPEN | two args: `a`, `b` |
+| `echo 'a'b` | 2nd `'` prev=`a` → CLOSE; `b` concatenates | one arg: `ab` |
+| `echo 'a''b'` | CLOSE (prev=`a`), OPEN (depth 0), CLOSE (prev=`b`) | one arg: `ab` |
+| `echo ''` | 2nd `'` prev=`'`, not whitespace → CLOSE | one empty arg |
+| `echo ' '` | 2nd `'` prev=space but no next rune → CLOSE | one arg: one space |
+| `echo 'don'\''t'` | CLOSE (prev=`n`); escaped `\'` never reaches the rule; OPEN; CLOSE (prev=`t`) | one arg: `don't` |
 
 ### 6.2 Nested Double Quotes
 
-Similarly, double quotes can be nested:
+The same rule, same shape:
 
 ```
-Input:  echo "echo "word""
-Depth:       1      2     1    0
-
-# Valid due to even count (4 quotes)
+Input:  echo "outer "inner" end"
+Depths:      1      2      1    0
+Tokens: [{Content: "outer \"inner\" end", WasQuoted: true}]
+Output: outer "inner" end
 ```
 
-### 6.3 Nested Backticks
+Double-quote semantics inside a nested region are unchanged (§3): `$` still expands and escapes are still processed — the nested `"` characters are simply literal content:
 
-Backticks support nesting through depth tracking:
+```
+Input:  echo "path "$HOME" here"
+Depths:      1     2      1     0
+Output: path "/home/user" here    ($HOME expands; the nested quotes print)
+```
+
+### 6.3 Nested Backticks (Recursive Command Substitution)
+
+Backticks follow the same rule, and because a backtick region is a command substitution, nesting has EXECUTION semantics: the body — with its nested backticks preserved literally — is re-parsed on execution, so nested backticks execute **recursively**.
+
+```
+Input:  echo `outer `inner` end`
+Depths:      1      2      1    0
+```
+
+The lexer emits one token containing the whole substitution (lexer.md §7). When it executes:
+
+1. The outer body is `` outer `inner` end ``.
+2. Re-parsing the body finds `` `inner` `` at depth 0 — an inner substitution.
+3. `inner` runs first; its output substitutes into the body; then `outer <output> end` runs; the outer output replaces the original expression.
 
 ```
 Input:  echo `echo `date``
-Depth:       1      2     1    0
-
-# Valid - processed innermost first
+# 2nd backtick NESTS (space before, d after) -> depth 2
+# 3rd backtick CLOSES (prev=e) -> depth 1
+# 4th backtick CLOSES (prev is the 3rd backtick, not whitespace) -> depth 0
+# Executes date, then echo <date output>.
 ```
 
-### 6.4 Mixed Nesting
+POSIX backticks cannot nest without escaping. Note the Foundation Shell difference in the other direction too: an ESCAPED backtick (`` \` ``) is always a literal backtick *character* here (lexer.md §5.1–5.2) — it is never the POSIX-style nesting mechanism. To nest, just nest (per the rule); to get a literal backtick character, escape it.
 
-Different quote types can be mixed:
+An unclosed backtick region reports `unclosed backtick` (§5.5), including the even-count case: `` echo `a `b `` nests at the second backtick and ends at depth 2.
+
+### 6.4 Mixed Quote Types
+
+Different-type quote characters inside an open region are literal content (§5.3) — the cross-type rules are unchanged by nesting:
 
 ```
-Input:  echo "hello 'world'"
-# Double quote depth: 1 (at 'world'), 1 (end) -> valid
-# Single quote is literal inside double quotes
-Output: hello 'world'
+Input:  echo 'say "hello"'
+Output: say "hello"           (double quotes literal inside single quotes)
 
-Input:  echo 'hello "world"'
-# Single quote depth: 1 (at "world"), 1 (end) -> valid
-# Double quote is literal inside single quotes
-Output: hello "world"
+Input:  echo "it's fine"
+Output: it's fine             (single quote literal inside double quotes)
+
+Input:  echo "run `date` now"
+# Backticks stay ACTIVE inside double quotes: the substitution executes.
 ```
 
-### 6.5 Subshell Depth Tracking
+Each type nests only against itself; the four depth counters are independent (§5.1).
 
-The `$()` syntax uses parenthesis depth tracking, separate from quote depth:
+### 6.5 Command-Substitution Depth (`$(...)`)
+
+`$(...)` nests by explicit delimiters — `$(` always opens, and a `)` at body depth 0 always closes (§5.1, lexer.md §7.1). The §5.2 neighbor rule is not involved:
 
 ```go
-// Handle $() subshell
+// Handle $( command substitution
 if c == '$' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) && a.input[a.pos+1] == '(' {
     parenDepth++
-    // ...
+    // ... push a fresh body quote context (§5.3)
 }
 
-// Handle closing ) for $()
-if c == ')' && parenDepth > 0 && singleQuoteDepth == 0 {
+// Handle closing ) — only when no body quote region is open
+if c == ')' && parenDepth > 0 &&
+    singleQuoteDepth == 0 && doubleQuoteDepth == 0 && backtickDepth == 0 {
     parenDepth--
-    // ...
+    // ... pop the body context
 }
 ```
 
-Subshells can be arbitrarily nested:
+Command substitutions can be arbitrarily nested:
 
 ```
 Input:  echo $(echo $(echo $(date)))
@@ -523,15 +657,16 @@ Input:  echo hello\
 Tokens: ["echo", "hello\\"]
 ```
 
-### 7.5 Escaped Quotes in Syntax Analyzer
+### 7.5 Escaped Quotes and Depth Tracking
 
-The syntax analyzer recognizes escaped characters to avoid counting them as quotes:
+Both scanners consume an escape sequence as a unit BEFORE quote-state tracking sees it, so an escaped quote character can never open, nest, or close a region (§5.2 rule 5):
 
 ```go
-// Handle escape sequences (outside single quotes)
+// Handle escape sequences (outside single-quote regions: singleQuoteDepth == 0)
 if c == '\\' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) {
     next := a.input[a.pos+1]
-    // Escaped characters don't count toward quote depth
+    // The escaped character never reaches quoteAction (§5.2.2):
+    // it cannot affect any depth counter.
     builder.WriteRune(c)
     builder.WriteRune(next)
     a.pos += 2
@@ -539,7 +674,7 @@ if c == '\\' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) {
 }
 ```
 
-This prevents `\"` from affecting double quote depth.
+This keeps `\"` from touching double-quote depth, and `\'` / `` \` `` from touching theirs. The neighbor test is unaffected in the other direction: as raw runes, a backslash or an already-processed delimiter participates in the §5.2 conditions (a)–(c) like any other rune (§5.2 rule 4).
 
 ---
 
@@ -547,7 +682,7 @@ This prevents `\"` from affecting double quote depth.
 
 ### 8.1 When Quotes Are Removed
 
-Quote characters (single and double) acting as DELIMITERS are **removed** during lexer tokenization. The output token contains only the content:
+Quote characters (single and double) acting as DELIMITERS are **removed** during lexer tokenization. Only the outermost pair of each region is a delimiter — nested quote characters (§6) are argument content and remain. The output token contains only the content:
 
 ```
 Input:  echo "hello world"
@@ -568,30 +703,13 @@ Token:  {Content: "$(echo \"a  b\")", WasQuoted: false}
 
 ### 8.2 How Quote Removal Works
 
-The lexer skips delimiter quote characters rather than appending them. The full state machine is normative in lexer.md §10.2; the quote handling in outline:
+The lexer applies the §5.2 rule to each active quote character and emits or skips it depending on the transition. The full state machine is normative in lexer.md §10.2; in outline:
 
-```go
-// Single quote toggle (literal inside double quotes and backtick bodies)
-if c == '\'' && !inDoubleQuotes && !inBacktickBody {
-    toggle inSingleQuotes
-    if insideSubstitutionBody {
-        current.WriteRune(c)   // body content - preserved verbatim
-    } else if entering {
-        wasSingleQuoted = true // delimiter - removed, flags set
-        wasQuoted = true
-    }
-}
-
-// Double quote toggle (literal inside single quotes)
-if c == '"' && !inSingleQuotes {
-    toggle inDoubleQuotes
-    if insideSubstitutionBody {
-        current.WriteRune(c)   // body content - preserved verbatim
-    } else {
-        wasQuoted = true       // delimiter - removed, flag set
-    }
-}
-```
+| Transition (§5.2) | Inside a substitution body? | Character emitted? | Flags |
+|-------------------|-----------------------------|--------------------|-------|
+| OPEN (0→1) or CLOSE (1→0) | no | NO — outermost delimiter, removed | `WasSingleQuoted`/`WasQuoted` set (per type) |
+| NEST or nested CLOSE (never touching 0) | no | YES — literal argument content | already set by the outermost OPEN |
+| any | yes | YES — body preserved verbatim | body quotes set no flags (lexer.md §7.1) |
 
 ### 8.3 Syntax Analyzer vs Lexer
 
@@ -696,9 +814,11 @@ type AnalyzedToken struct {
     Value string
     Start int
     End   int
-    Depth int  // Maximum nesting depth for this token
+    Depth int  // Max nesting level reached in this token (§5.4 high-water mark)
 }
 ```
+
+`Depth` is defined precisely as the maximum nesting level reached within the token, across quote regions and command substitutions — the high-water mark of the total depth (§5.4) over the token's span (canonical definition and examples: highlighting.md §9.4). A plain `'a'` has Depth 1; `'a 'b' c'` has Depth 2; unquoted `foo` has Depth 0.
 
 ---
 
@@ -860,14 +980,19 @@ Output: Hello johndoe
 ### 12.2 Nested Quotes (Depth Tracking)
 
 ```
-# Four single quotes - valid (even count)
+# The 2nd quote NESTS (space before, i after); the 3rd and 4th CLOSE
 Input:  echo 'outer 'inner' outer'
 Depths: 0    1      2      1      0
-Valid:  YES
+Valid:  YES -> one argument: outer 'inner' outer
 
-# Three single quotes - invalid (odd count)
+# Same input truncated: depth never returns to 0
 Input:  echo 'outer 'inner'
 Depths: 0    1      2      1
+Valid:  NO - unclosed single quote
+
+# EVEN quote count, still unclosed: the 2nd quote NESTS (§5.5)
+Input:  echo 'a 'b
+Depths: 0    1   2
 Valid:  NO - unclosed single quote
 ```
 
@@ -939,42 +1064,78 @@ Input:  grep -r 'func main' ./src
 Tokens: [grep, -r, func main, ./src]
 # Note: 'func main' has WasSingleQuoted: true
 
-# Complex mixed quoting
+# Interleaved quoting (POSIX-style concatenation - unchanged by nesting)
 Input:  echo "Hello, "'"'"$USER"'"'"!"
-Tokens: [echo, Hello, '", $USER (expanded), "'!]
-# Actually concatenates to: Hello, '"johndoe"'!
+Token:  {Content: "Hello, \"$USER\"!", WasSingleQuoted: true, WasQuoted: true}
+Output: Hello, "$USER"!    (NOT expanded - WasSingleQuoted suppresses expansion)
+# Every interior quote character either follows a non-whitespace rune or is
+# followed by another quote character, so each one CLOSES (§5.2 exclusion (c)) -
+# the input concatenates exactly as in POSIX. Matches lexer.md §12.6.
+
+# Nesting showcase (Foundation Shell divergence - §6, §13)
+Input:  echo 'a 'b' c' 'd'
+Tokens: [echo, a 'b' c, d]
+# POSIX produces [echo, a b c, d]; the nesting rule keeps the interior pair.
 ```
 
 ---
 
-## 13. Differences from POSIX Shell
+## 13. Differences from POSIX Shells
+
+Quoting is where Foundation Shell most visibly diverges from POSIX. The divergences are deliberate; this section is the honest inventory. (See also the warning at the top of this file, and lexer.md §13 for tokenization-level differences.)
+
+### 13.1 The Nesting Rule (Flagship)
+
+POSIX quote characters strictly toggle: the first `'` opens, the next `'` ALWAYS closes. Foundation Shell instead applies the open/nest/close rule (§5.2): a same-type quote character inside an open region NESTS when it is whitespace-preceded and followed by a non-whitespace, non-quote rune.
+
+What it buys:
+
+- **Literal same-type quotes inside a quoted argument, without escaping**: `echo 'it 'really' works'` → `it 'really' works`. POSIX needs `"it 'really' works"` (switching quote types) or escape dances.
+- **Nested backticks that execute recursively, without escaping**: `` echo `outer `inner` end` `` runs `inner` inside the outer substitution (§6.3). POSIX backticks cannot nest unescaped.
+- **No `'\''` dance for the whitespace-delimited case.** (Attached apostrophes still use it — `'don'\''t'`, §2.3.)
+
+### 13.2 Same Input, Both Valid, Different Results
+
+```
+echo 'a 'b' c' 'd'
+# POSIX:            args = [a b c, d]     (four delimiters + concatenation)
+# Foundation Shell: args = [a 'b' c, d]   (outer pair + nested pair, §6.1)
+```
+
+Both shells accept this input; they disagree about what it means. The divergence is self-announcing: whenever the nesting reading wins, the interior quote characters remain visibly in the argument (§5.2 rule 3) — output never silently *loses* structure relative to POSIX; it visibly keeps quotes POSIX would have consumed. The same goes for expansions: content POSIX would have expanded outside quotes (the `$X` in `'a '$X' c'`) stays literal here, wrapped in visible quotes.
+
+### 13.3 The Costs: Valid POSIX Inputs That Are Errors Here
+
+When the rule reads "nest" but the input never brings the depth back to 0, Foundation Shell rejects input POSIX accepts. Every such mis-guess is LOUD — an unclosed-quote error, never a silently different word:
+
+| Input | POSIX result | Foundation Shell | Write instead |
+|-------|--------------|------------------|---------------|
+| `echo 'hello 'world` | `hello world` | error: `unclosed single quote` | `echo 'hello world'` |
+| `echo ' 'x` | ` x` (space + x) | error: `unclosed single quote` | `echo ' x'` |
+| `echo "Total: "$N` | `Total: ` + value of `$N` | error: `unclosed double quote` | `echo "Total: $N"` |
+| `echo "count: "$(date)` | `count: ` + date output | error: `unclosed double quote` | `echo "count: $(date)"` |
+
+In each row the quote character before the trailing text is whitespace-preceded and followed by ordinary text, so it NESTS (§5.2); depth ends above 0 and the input fails with the canonical unclosed error (§5.5). The rewrite is always the simpler one-region form — the close-then-concatenate idiom is unnecessary here because expansions already run inside double quotes.
+
+### 13.4 POSIX-Identical Anchors
+
+The neighbor conditions deliberately reduce to POSIX behavior for the common patterns: `'a' 'b'`, `'a'b`, `'a''b'`, `''`, `' '`, `'don'\''t'`, `"say \"hi\""`, and interleaves like §12.6's `echo "Hello, "'"'"$USER"'"'"!"` all tokenize exactly as POSIX tokenizes them (§6.1.1).
+
+### 13.5 Other Deliberate Divergences
 
 | Feature | POSIX Shell | Foundation Shell |
 |---------|-------------|------------------|
-| Single quote nesting | Not allowed | Allowed via depth tracking |
-| Double quote nesting | Not allowed | Allowed via depth tracking |
+| Expansion suppression granularity | Per character span: in `'a'$HOME`, `$HOME` expands | Whole token: any single-quoted part suppresses ALL expansion for the token (§2.5) |
+| Tilde suppression granularity | `~/"docs"` expands the tilde | Any quoted part suppresses tilde expansion for the whole token (`WasQuoted`, §2.4) |
+| Escaped backtick inside backticks | The nesting mechanism | Always a literal backtick character (§6.3; lexer.md §5.1) |
 | `$'...'` ANSI-C quoting | Supported (Bash) | Not supported |
 | `$"..."` locale translation | Supported (Bash) | Not supported |
 | Line continuation `\<newline>` | Joins lines | Not supported |
-| Here-documents `<<` | Supported | Not supported |
-| Here-strings `<<<` | Supported (Bash) | Not supported |
+| Here-documents `<<` / here-strings `<<<` | Supported | Not supported |
 | `\` at EOL in double quotes | Line continuation | Not supported |
+| U+0001 in input | Ordinary data | Reserved internal byte; behavior undefined (lexer.md §5.1.4) |
 
-### 13.1 Key Behavioral Differences
-
-**Quote Depth Tracking**: Foundation Shell allows what POSIX considers invalid:
-
-```
-# Foundation Shell: VALID (4 quotes, even count)
-echo 'a 'b' c'
-
-# POSIX: Would be parsed as:
-# - 'a ' (single quoted)
-# - b (unquoted)
-# - ' c' (unclosed quote - ERROR)
-```
-
-This is an intentional design choice for Foundation Shell's depth-based quote validation.
+Unchanged by design (POSIX-identical, stated to prevent doubt): empty quoted strings produce empty arguments (lexer.md §4.5); quoting or escaping an operator character makes it literal, and operators are recognized only outside quotes and substitutions (lexer.md §3.3.4).
 
 ---
 
@@ -1051,8 +1212,8 @@ type SyntaxError struct {
 
 ### 15.1 Critical Test Cases
 
-1. **Even/odd quote counts**: Test that even counts are valid, odd counts error
-2. **Quote isolation**: Verify quotes inside other quotes are literal (§5.3)
+1. **Nesting decisions (§5.2)**: open at depth 0; each neighbor condition (a)–(c) individually flips NEST to CLOSE; even-count unclosed inputs (`'a 'b`); odd counts always unclosed
+2. **Quote isolation**: Verify different-type quotes inside open regions are literal (§5.3)
 3. **Escape processing**: Test all escape sequences in all contexts
 4. **Concatenation**: Test adjacent quoted segments
 5. **Empty strings**: Test that `""` and `''` produce empty tokens
@@ -1074,6 +1235,9 @@ echo ""''
 # Quote at word boundary
 echo hello"world"there
 
+# Multi-level same-type nesting (§6.1)
+echo 'l1 'l2 'l3' l2' l1'
+
 # Maximum nesting
 echo "$(echo '$(echo `date`)')"
 
@@ -1091,8 +1255,8 @@ Foundation Shell's quoting system provides:
 2. **Double quotes** for whitespace preservation with expansion
 3. **Backticks and $()** for command substitution
 4. **Escape sequences** for character-level control
-5. **Depth tracking** for robust quote validation
-6. **Quote removal** during tokenization (substitution bodies preserved verbatim)
+5. **Depth-tracked nesting** (§5, §6) — same-type quotes can nest; the flagship non-POSIX feature
+6. **Quote removal** during tokenization (outermost pairs only; nested quotes and substitution bodies preserved)
 7. **WasSingleQuoted / WasQuoted flags** for expansion control
 
 The system prioritizes:
