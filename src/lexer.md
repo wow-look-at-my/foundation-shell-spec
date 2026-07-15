@@ -1,22 +1,27 @@
 ---
 title: Lexer Specification
-description: Tokenization rules, escape sequences, quote state tracking, and whitespace-based token separation.
+description: Tokenization rules, operator recognition, command-substitution-aware scanning, escape sequences, and quote state tracking.
 ---
 
 # Lexer Specification
 
+> **Canonical for:** tokenization — word/token vocabulary, word boundaries, operator lexing, escape processing, quote state, and command-substitution scanning. The authority map lives in the README.
+
 ## 1. Overview
 
-The lexer (tokenizer) is the first stage of Foundation Shell's input processing pipeline. It transforms raw input strings into a sequence of tokens that preserve semantic information about quoting context. The lexer operates as a single-pass scanner that handles escape sequences, quote state tracking, and whitespace-based token separation.
+The lexer (tokenizer) is the first stage of Foundation Shell's input processing pipeline. It transforms raw input strings into a sequence of tokens that preserve semantic information about quoting context. The lexer operates as a single-pass scanner that handles escape sequences, quote state tracking, operator recognition, command-substitution scanning, and whitespace-based token separation.
 
 ### 1.1 Design Philosophy
 
 Foundation Shell's lexer follows these principles:
 
-1. **Quote Context Preservation**: Tokens retain metadata about whether they were single-quoted, enabling downstream components to decide whether to perform expansions.
-2. **Escape Marker System**: Escaped dollar signs are marked with a special character (`\x01`) to prevent expansion while preserving the original intent.
-3. **Operator Deferral**: The lexer does NOT recognize operators; it produces raw string tokens. Operator recognition happens during parsing.
-4. **Unicode Support**: The lexer operates on runes, supporting full Unicode input.
+1. **Quote Context Preservation**: Tokens retain metadata about whether any part was quoted (`WasQuoted`) and whether any part was single-quoted (`WasSingleQuoted`), enabling downstream components to decide whether to perform expansions.
+2. **Escape Marker System**: Escaped dollar signs and escaped backticks are marked with a special character (`\x01`) to prevent expansion while preserving the original intent.
+3. **Operator Recognition**: The lexer recognizes operators directly (maximal munch, no whitespace required) and marks the resulting tokens with `IsOperator`. The parser maps marked operator tokens to formal token types and never re-derives operators from token content.
+4. **Command-Substitution Awareness**: The lexer tracks `$(...)` parenthesis depth and backtick state so that an entire substitution — including embedded whitespace and quotes — stays in one token. Substitution bodies are preserved verbatim and re-parsed recursively when the substitution executes.
+5. **Unicode Support**: The lexer operates on runes, supporting full Unicode input.
+
+> **Note:** The quoting/expansion model built on these tokens is deliberately non-POSIX in specific, documented ways (whole-token expansion suppression, among others). See quoting.md §13 for the complete list.
 
 ### 1.2 Processing Pipeline Position
 
@@ -24,10 +29,10 @@ Foundation Shell's lexer follows these principles:
 Input String
      |
      v
-  [LEXER] --> TokenContext[] (Content + WasSingleQuoted)
+  [LEXER] --> TokenContext[] (Content + WasSingleQuoted + WasQuoted + IsOperator)
      |
      v
-  [PARSER] --> Operator recognition, expansion, classification
+  [PARSER] --> Operator mapping, expansion, classification
      |
      v
   [CHAIN BUILDER] --> CommandSpec structures
@@ -43,10 +48,20 @@ The lexer produces `TokenContext` structures, NOT the formal `Token` types. Toke
 
 ```go
 type TokenContext struct {
-    Content         string  // The token's text content (escapes processed)
+    Content         string  // The token's text content (escapes processed, quote delimiters removed)
     WasSingleQuoted bool    // True if any part was inside single quotes
+    WasQuoted       bool    // True if any part was inside any quotes (single or double)
+    IsOperator      bool    // True if the lexer recognized this token as an operator
 }
 ```
+
+Downstream consumers of the flags:
+
+| Flag | Consumer | Effect |
+|------|----------|--------|
+| `WasSingleQuoted` | Expander | Suppresses ALL expansion for the token |
+| `WasQuoted` | Expander | Suppresses tilde expansion for the token |
+| `IsOperator` | Parser | The ONLY basis for classifying a token as an operator |
 
 ### 2.2 Formal Token Types (Classified by Parser)
 
@@ -77,6 +92,15 @@ Value tokens carry a string value in their `Value` field.
 
 Operator tokens have an empty `Value` field; their meaning is conveyed by their type.
 
+### 2.3 Word and Token Vocabulary
+
+These two terms are used throughout the specification and are defined here once:
+
+- A **word** is a maximal run of input characters between word boundaries (§3.2), before any classification. Quote delimiters and escape sequences are part of the word as written, and are processed while the word is accumulated.
+- A **token** is the `TokenContext` the lexer emits — either the processed content of a word, or a recognized operator.
+
+The parser's classified tokens and the analyzer's `AnalyzedToken`s (highlighting.md) are distinct downstream structures. When other specification files say "token" without qualification, they mean the lexer's `TokenContext`.
+
 ---
 
 ## 3. Tokenization Rules
@@ -101,9 +125,10 @@ The lexer uses Go's `unicode.IsSpace()` to identify whitespace, which includes:
 
 | Context | Behavior |
 |---------|----------|
-| Outside quotes | Terminates current token, starts new token |
+| Outside quotes and substitutions | Terminates current token, starts new token |
 | Inside single quotes | Preserved literally as part of token |
 | Inside double quotes | Preserved literally as part of token |
+| Inside `$(...)` or backticks | Preserved literally as part of token |
 | Leading whitespace | Ignored (no empty token produced) |
 | Trailing whitespace | Ignored (no empty token produced) |
 | Multiple consecutive spaces | Treated as single separator |
@@ -122,46 +147,77 @@ Tokens: ["echo", "hello"]
 
 Input: "echo 'hello world'"
 Tokens: ["echo", "hello world"]
+
+Input: "echo $(echo hello world)"
+Tokens: ["echo", "$(echo hello world)"]
 ```
 
 ### 3.2 Word Boundaries
 
-A word (token) boundary occurs when:
+A word boundary occurs when:
 
-1. Unquoted whitespace is encountered
-2. End of input is reached
+1. Unquoted whitespace outside any command substitution is encountered
+2. An operator is recognized (§3.3)
+3. End of input is reached
 
-Words are accumulated character-by-character until a boundary is reached.
+Words are accumulated character-by-character until a boundary is reached. At EVERY word boundary the per-word flags (`WasSingleQuoted`, `WasQuoted`) are reset — whether or not a token was emitted at that boundary. (A run of whitespace produces no token but still resets the flags; this guarantees that `echo '' $HOME` expands `$HOME`.)
 
 ### 3.3 Operator Recognition
 
-**IMPORTANT**: The lexer does NOT perform operator recognition. Operators like `|`, `&&`, `||`, `;`, `>`, `<`, `>>`, `2>`, `2>>` are treated as regular characters during lexing.
+The lexer recognizes operators directly. Operators do NOT require whitespace separation from adjacent words.
 
-Operator recognition happens in the parser's `parseOperator()` function, which checks if a token's content matches an operator string:
+When the lexer encounters an unquoted, unescaped operator character (`|`, `&`, `;`, `<`, `>`) outside any command substitution, it:
 
-```go
-func parseOperator(s string) (token.TokenType, bool) {
-    switch s {
-    case "|":   return token.Pipe, true
-    case "&&":  return token.And, true
-    case "||":  return token.Or, true
-    case ";":   return token.Semicolon, true
-    case "<":   return token.RedirectStdIn, true
-    case ">":   return token.RedirectStdOut, true
-    case ">>":  return token.RedirectStdOutAppend, true
-    case "2>":  return token.RedirectStdErr, true
-    case "2>>": return token.RedirectStdErrAppend, true
-    default:    return 0, false
-    }
-}
-```
+1. Flushes the current word (if any) as a token
+2. Lexes the operator by maximal munch over the operator set: `||`, `&&`, `>>`, `2>>`, `2>`, `|`, `;`, `<`, `>`
+3. Emits the operator as a token with `IsOperator: true`
 
-This means operators MUST be whitespace-separated from adjacent tokens:
+Maximal munch means the longest operator is matched first: `2>>` before `>>` before `>`, and `&&`/`||` before `|`.
+
+#### 3.3.1 The `2>` / `2>>` Rule
+
+`2>` and `2>>` are recognized only when the pending word is exactly an unquoted, unescaped `2`. The `2` is consumed into the operator token instead of being emitted as a word. In every other case `>` / `>>` are lexed on their own:
 
 ```
-Valid:   "echo hello | grep world"
-Invalid: "echo hello|grep world"  (produces token "hello|grep")
+echo 2>err.log      -> [echo, 2>, err.log]       (stderr redirect)
+echo 2>>err.log     -> [echo, 2>>, err.log]      (stderr append)
+echo a2>out.log     -> [echo, a2, >, out.log]    (word "a2", stdout redirect)
+echo 22>out.log     -> [echo, 22, >, out.log]    (word "22", stdout redirect)
+echo "2">out.log    -> [echo, 2, >, out.log]     (quoted "2" is an argument)
+echo 2 >out.log     -> [echo, 2, >, out.log]     (whitespace separates the 2)
 ```
+
+#### 3.3.2 Single `&` Is Not an Operator
+
+Foundation Shell has no background jobs. A lone `&` is a literal word character; only the two-character `&&` is an operator:
+
+```
+echo a&b     -> [echo, a&b]          (one word)
+echo a&&b    -> [echo, a, &&, b]
+```
+
+#### 3.3.3 Examples
+
+```
+echo hello | grep world   -> [echo, hello, |, grep, world]
+echo hello|grep world     -> [echo, hello, |, grep, world]
+                             (identical: "hello|grep" lexes as three tokens
+                              hello, |, grep)
+echo>file                 -> [echo, >, file]
+cat<in>out                -> [cat, <, in, >, out]
+```
+
+#### 3.3.4 Quoting and Escaping Defeat Operator Recognition
+
+An operator character inside quotes is literal content, and an escaped operator character outside quotes is a literal character — never an operator:
+
+```
+echo "|"    -> [echo, {Content: "|", IsOperator: false}]   literal argument
+echo '>'    -> [echo, {Content: ">", IsOperator: false}]   literal argument
+echo \|     -> [echo, {Content: "|", IsOperator: false}]   literal argument
+```
+
+The parser maps operator tokens to formal token types by content (see parser.md), but ONLY for tokens the lexer marked with `IsOperator: true`.
 
 ---
 
@@ -181,22 +237,22 @@ Single quotes create **strong quoting** - everything inside is preserved literal
 | No variable expansion | Dollar signs are literal: `'$VAR'` -> `$VAR` |
 | Preserves whitespace | Spaces don't split: `'a b'` -> single token `a b` |
 | Cannot contain single quote | No way to include `'` inside single quotes |
-| Sets WasSingleQuoted flag | Token marked for expansion suppression |
+| Sets WasSingleQuoted flag | Token marked for expansion suppression (WasQuoted is also set) |
 
 #### 4.1.2 Single Quote Examples
 
 ```
 Input: echo 'hello world'
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello world", WasSingleQuoted: true}]
+Tokens: [{Content: "echo"},
+         {Content: "hello world", WasSingleQuoted: true, WasQuoted: true}]
 
 Input: echo 'hello $VAR \n world'
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello $VAR \n world", WasSingleQuoted: true}]
+Tokens: [{Content: "echo"},
+         {Content: "hello $VAR \n world", WasSingleQuoted: true, WasQuoted: true}]
 
 Input: echo 'back\\slash'
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "back\\slash", WasSingleQuoted: true}]
+Tokens: [{Content: "echo"},
+         {Content: "back\\slash", WasSingleQuoted: true, WasQuoted: true}]
 ```
 
 ### 4.2 Double Quotes (`"..."`)
@@ -211,37 +267,38 @@ Double quotes create **weak quoting** - whitespace is preserved but escapes are 
 | Variable expansion allowed | `$VAR` and `${VAR}` will be expanded (by expander) |
 | Preserves whitespace | Spaces don't split tokens |
 | Can contain escaped quotes | `\"` produces literal `"` |
-| Does NOT set WasSingleQuoted | Token eligible for expansion |
+| Sets WasQuoted flag | Tilde expansion suppressed; other expansions still eligible |
+| Does NOT set WasSingleQuoted | Token eligible for variable/command expansion |
 
 #### 4.2.2 Double Quote Examples
 
 ```
 Input: echo "hello world"
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello world", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "hello world", WasQuoted: true}]
 
 Input: echo "say \"hello\""
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "say \"hello\"", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "say \"hello\"", WasQuoted: true}]
 
 Input: echo "path\\to\\file"
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "path\to\file", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "path\to\file", WasQuoted: true}]
 ```
 
 ### 4.3 Backticks (`` `...` ``)
 
-Backticks are used for command substitution. The lexer does NOT process backticks specially - they are treated as regular characters. Command substitution expansion happens in the expander phase.
+Backticks delimit command substitution. The lexer tracks backtick state (a pure toggle, §7): an unescaped backtick outside single quotes opens a substitution and the next one closes it. Between the two, the body — including whitespace and quote characters — is preserved verbatim in the token.
 
 #### 4.3.1 Backtick Behavior in Lexer
 
 ```
-Input: echo `date`
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "`date`", WasSingleQuoted: false}]
+Input: echo `date +%Y %m`
+Tokens: [{Content: "echo"},
+         {Content: "`date +%Y %m`"}]
 ```
 
-The backtick-delimited content remains in the token for later expansion.
+The backtick-delimited content remains in the token; the expander executes it later (see §7 and expansion.md).
 
 ### 4.4 Quote Concatenation
 
@@ -258,39 +315,44 @@ Adjacent quoted and unquoted segments without whitespace are concatenated into a
 
 #### 4.4.2 WasSingleQuoted with Concatenation
 
-If ANY part of a concatenated token was single-quoted, the entire token is marked as `WasSingleQuoted: true`. This is a conservative approach to prevent unintended expansion.
+If ANY part of a concatenated token was single-quoted, the entire token is marked as `WasSingleQuoted: true`. This is a conservative approach to prevent unintended expansion. Likewise, if any part was inside any quotes, the token is marked `WasQuoted: true`.
 
 ```
 Input: echo 'single'"double"unquoted
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "singledoubleunquoted", WasSingleQuoted: true}]
+Tokens: [{Content: "echo"},
+         {Content: "singledoubleunquoted", WasSingleQuoted: true, WasQuoted: true}]
 ```
 
 ### 4.5 Empty Quoted Strings
 
-Empty quoted strings (`""` or `''`) produce no content:
+Empty quoted strings (`""` or `''`) produce a token with empty content — empty arguments ARE representable (as in POSIX shells):
 
 ```
 Input: echo ""
-Tokens: [{Content: "echo", WasSingleQuoted: false}]
-// Note: The empty string does not produce a separate token
+Tokens: [{Content: "echo"},
+         {Content: "", WasQuoted: true}]
 
 Input: echo ''
-Tokens: []
-// If only empty quotes with no other content, no tokens produced
+Tokens: [{Content: "echo"},
+         {Content: "", WasSingleQuoted: true, WasQuoted: true}]
+
+Input: ''
+Tokens: [{Content: "", WasSingleQuoted: true, WasQuoted: true}]
 ```
+
+A quoted-empty word is still a word: seeing a quote pair makes the current word exist, so a token is emitted at the next boundary even though it has no content. Whitespace runs alone still produce no token.
 
 ---
 
 ## 5. Escape Sequences
 
-Escape processing occurs outside single quotes. The backslash character (`\`) initiates an escape sequence.
+Escape processing occurs outside single quotes. The backslash character (`\`) initiates an escape sequence. (Inside command-substitution bodies, escape sequences are preserved verbatim instead of being processed — see §7.2.)
 
 [include:_partials/escape-sequences.md](_partials/escape-sequences.md)
 
 ### 5.1 The Escape Marker System
 
-When `\$` is encountered (outside single quotes), the lexer produces the two-character sequence `\x01$` rather than just `$`. This "escape marker" (`\x01`, ASCII SOH) serves as a flag to the expander that this dollar sign should NOT trigger variable expansion.
+When `\$` or `` \` `` is encountered (outside single quotes and outside substitution bodies), the lexer produces the two-character sequence `\x01$` (or `` \x01` ``) rather than just the bare character. This "escape marker" (`\x01`, ASCII SOH) serves as a flag to the expander that this dollar sign or backtick should NOT trigger expansion or command substitution.
 
 #### 5.1.1 Escape Marker Constant
 
@@ -300,8 +362,8 @@ const EscapeMarker = '\x01'  // ASCII Start of Heading
 
 #### 5.1.2 Escape Marker Lifecycle
 
-1. **Lexer**: `\$VAR` becomes `\x01$VAR`
-2. **Expander**: Sees `\x01$`, skips expansion, outputs `$VAR`
+1. **Lexer**: `\$VAR` becomes `\x01$VAR`; `` \`date\` `` becomes `` \x01`date\x01` ``
+2. **Expander**: Sees `\x01$` / `` \x01` ``, skips expansion, keeps the character literal
 3. **Post-expansion**: `StripEscapeMarkers()` removes any remaining `\x01` characters
 
 #### 5.1.3 StripEscapeMarkers Function
@@ -312,28 +374,38 @@ func StripEscapeMarkers(s string) string {
 }
 ```
 
+#### 5.1.4 Reserved Marker Byte (Known Limitation)
+
+U+0001 is reserved for internal use. `StripEscapeMarkers` removes EVERY U+0001 byte, and the expander treats `\x01$` / `` \x01` `` as escape markers regardless of origin. Input that itself contains a literal U+0001 character (typed via Ctrl-V Ctrl-A, or embedded in a script) therefore has **undefined behavior**. U+0001 is formally outside the supported input alphabet.
+
 ### 5.2 Escape Examples
 
 ```
 Input: echo hello\ world
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello world", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "hello world"}]
 
 Input: echo hello\\world
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello\world", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "hello\world"}]
 
 Input: echo \$HOME
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "\x01$HOME", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "\x01$HOME"}]
+
+Input: echo \`date\`
+Tokens: [{Content: "echo"},
+         {Content: "\x01`date\x01`"}]
+// The marked backticks are NOT executed; after expansion and marker
+// stripping the argument is `date` (literal backticks)
 
 Input: echo \"hello\"
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "\"hello\"", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "\"hello\""}]
 
 Input: echo hello\nworld
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello\nworld", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "hello\nworld"}]
 // Note: \n becomes actual newline character (0x0A)
 ```
 
@@ -343,68 +415,75 @@ A backslash at the end of input (with nothing to escape) is preserved literally:
 
 ```
 Input: echo hello\
-Tokens: [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello\", WasSingleQuoted: false}]
+Tokens: [{Content: "echo"},
+         {Content: "hello\"}]
 ```
 
 ---
 
 ## 6. Variable Recognition
 
-**IMPORTANT**: The lexer does NOT perform variable recognition or expansion. Variables (`$VAR`, `${VAR}`) are preserved as literal text in tokens. Variable expansion is handled by the expander phase.
+**IMPORTANT**: The lexer does NOT perform variable expansion. Variables (`$VAR`, `${VAR}`) are preserved as literal text in tokens. Variable expansion is handled by the expander phase (see expansion.md).
 
-### 6.1 Variable Syntax (Recognized by Expander)
+[include:_partials/variable-syntax.md](_partials/variable-syntax.md)
 
-The expander recognizes two variable syntaxes:
-
-| Syntax | Example | Description |
-|--------|---------|-------------|
-| `$VAR` | `$HOME`, `$PATH` | Simple variable reference |
-| `${VAR}` | `${HOME}`, `${USER}` | Braced variable reference |
-
-### 6.2 Variable Name Rules
-
-Variable names follow these rules (enforced by expander):
-
-- **First character**: Letter (a-z, A-Z) or underscore (_)
-- **Subsequent characters**: Letters, digits (0-9), or underscore
-- Names are case-sensitive: `$var` and `$VAR` are different
-
-### 6.3 Variable Expansion Prevention
+### 6.1 Variable Expansion Prevention
 
 Variables are NOT expanded when:
 
 1. Token was single-quoted (`WasSingleQuoted: true`)
 2. Dollar sign was escaped (`\$` becomes `\x01$`)
 
-### 6.4 Special Dollar Sequences
-
-These sequences are NOT expanded as variables (passed through literally):
-
-| Sequence | Behavior |
-|----------|----------|
-| `$$` | Literal `$$` (no process ID expansion) |
-| `$!` | Literal `$!` (no background PID expansion) |
-| `$?` | Literal `$?` (no exit status expansion) |
-| `$` at end | Literal `$` |
-| `${}`| Literal `${}` (empty variable name) |
-
 ---
 
-## 7. Subshell Recognition
+## 7. Command Substitution Recognition
 
-**IMPORTANT**: The lexer does NOT perform subshell recognition or expansion. Subshell syntax is preserved as literal text and processed by the expander phase.
+The lexer recognizes command-substitution **delimiters** so that an entire substitution stays inside one token. It does NOT execute or expand substitutions — that happens in the expander phase (see expansion.md).
 
-### 7.1 Subshell Syntax (Recognized by Expander)
+[include:_partials/command-substitution-syntax.md](_partials/command-substitution-syntax.md)
 
-| Syntax | Example | Description |
-|--------|---------|-------------|
-| `$(...)` | `$(date)`, `$(echo hello)` | Modern command substitution |
-| `` `...` `` | `` `date` ``, `` `echo hello` `` | Legacy command substitution |
+### 7.1 Substitution Scanning Rules
 
-### 7.2 Nested Subshells
+1. An unescaped `$(` outside single quotes opens a command substitution and increments the parenthesis depth. `$(...)` may nest: each `$(` inside an open substitution increments the depth again.
+2. An unescaped backtick outside single quotes toggles backtick state. Backticks cannot nest: while a backtick substitution is open, the next unescaped backtick always closes it.
+3. While inside an open substitution (parenthesis depth > 0, or backtick open), the body is preserved **verbatim**:
+   - Whitespace does NOT split tokens; it is copied into the token.
+   - Quote characters (`'`, `"`) are copied verbatim — they are not removed and they do NOT set the token's `WasQuoted`/`WasSingleQuoted` flags. They do update the body's own quote state (rule 4).
+   - Backslash escape sequences are copied verbatim (backslash retained). The escaped character is skipped for state purposes: it cannot close the substitution, toggle body quote state, or start a nested substitution.
+   - Operator characters are NOT recognized; they are body content.
 
-The expander supports nested subshells by processing innermost substitutions first:
+   The body takes effect when the substitution executes: the expander re-parses the body recursively with the full lexer (quotes, escapes, operators and all). This is why the body must be preserved exactly as written.
+4. Finding the closing delimiter — body quote state:
+   - Each `$(` begins a fresh quote context. The enclosing context (for example an open double quote around the whole substitution) is saved and restored when the substitution closes. `echo "$(date)"` is therefore valid: the `)` closes the substitution even though the outer double quote is still open.
+   - A `)` closes the innermost open `$(` only when the body's own single-quote and double-quote counts are even and no backtick opened inside the body is still open. Otherwise the `)` is body content. Both `echo $(echo ")")` and `echo $(echo ')')` are valid.
+   - Inside an open backtick substitution, single quotes are literal (they do not open a quote context — see quoting.md §5.3) and nothing except an unescaped backtick closes the body. Use `` \` `` for a literal backtick inside a backtick body.
+5. Substitutions still open at end of input are lexer errors, using the same canonical strings as the analyzer (§9): `unclosed command substitution $(...)` and `unclosed backtick (odd count)`.
+
+### 7.2 Examples
+
+```
+Input: echo $(echo hello world)
+Tokens: [{Content: "echo"}, {Content: "$(echo hello world)"}]
+// Whitespace inside the substitution does not split the token
+
+Input: echo $(echo "a  b")
+Tokens: [{Content: "echo"}, {Content: "$(echo \"a  b\")"}]
+// The double quotes stay in the body; when executed, the inner command
+// preserves the two spaces
+
+Input: echo $(echo ")")
+Tokens: [{Content: "echo"}, {Content: "$(echo \")\")"}]
+// The quoted ) does not close the substitution
+
+Input: echo "$(date)"
+Tokens: [{Content: "echo"}, {Content: "$(date)", WasQuoted: true}]
+// The OUTER double quotes are delimiters (removed, flag set); the
+// substitution closes normally inside them
+```
+
+### 7.3 Nested Substitutions
+
+The expander processes nested substitutions innermost-first:
 
 ```
 $(echo $(date))
@@ -416,12 +495,12 @@ Processing order:
 3. Find remaining `$(echo <output>)`
 4. Execute, replace with final output
 
-### 7.3 Subshell Expansion Prevention
+### 7.4 Substitution Expansion Prevention
 
-Subshells are NOT expanded when:
+Command substitutions are NOT expanded when:
 
 1. Token was single-quoted (`WasSingleQuoted: true`)
-2. Dollar sign was escaped (for `$(...)` syntax): `\$(date)` is not expanded
+2. The introducing character was escaped: `\$(date)` and `` \`date\` `` are not expanded (escape marker, §5.1)
 3. No executor is provided to the parser
 
 ---
@@ -447,45 +526,38 @@ If comment support is added in the future, the typical shell behavior would be:
 
 ## 9. Error Conditions
 
-The lexer can produce the following errors:
+The lexer reports scanning errors using the SAME canonical strings as the syntax analyzer for the same conditions. The canonical error-string table lives in diagnostics.md §5; the lexer can produce these four:
 
-### 9.1 Unclosed Single Quote
+| Condition | Error string |
+|-----------|--------------|
+| Single-quote count is odd at end of input | `unclosed single quote (odd count)` |
+| Double-quote count is odd at end of input | `unclosed double quote (odd count)` |
+| Backtick substitution still open at end of input | `unclosed backtick (odd count)` |
+| `$(` depth > 0 at end of input | `unclosed command substitution $(...)` |
 
-**Error**: `"unclosed single quote"`
+### 9.1 Examples
 
-**Cause**: Input contains an opening `'` without a matching closing `'`.
-
-**Examples**:
 ```
-echo 'hello          -> Error: unclosed single quote
-'hello world         -> Error: unclosed single quote
-echo 'it's fine'     -> Valid (middle ' closes first, opens second)
-```
-
-### 9.2 Unclosed Double Quote
-
-**Error**: `"unclosed double quote"`
-
-**Cause**: Input contains an opening `"` without a matching closing `"`.
-
-**Examples**:
-```
-echo "hello          -> Error: unclosed double quote
-"hello world         -> Error: unclosed double quote
+echo 'hello          -> Error: unclosed single quote (odd count)
+echo 'it's fine'     -> Error: unclosed single quote (odd count)  (3 quotes - odd)
+echo 'it'\''s ok'    -> Valid (4 active single quotes; the escaped \' does not count)
+echo "hello          -> Error: unclosed double quote (odd count)
 echo "say \"hi\""    -> Valid (escaped quotes don't count)
+echo $(date          -> Error: unclosed command substitution $(...)
+echo `date           -> Error: unclosed backtick (odd count)
 ```
 
-### 9.3 Error Behavior
+### 9.2 Error Behavior
 
 When an error occurs:
 - The lexer returns `nil` for the token slice
-- The error describes the problem
+- The error message is exactly one of the canonical strings above
 - No partial results are returned
 
 ```go
 tokens, err := Tokenize(input)
 if err != nil {
-    // err.Error() == "unclosed single quote" or "unclosed double quote"
+    // err.Error() is one of the four canonical strings above
     // tokens == nil
 }
 ```
@@ -501,45 +573,92 @@ The lexer maintains these state variables:
 | Variable | Type | Purpose |
 |----------|------|---------|
 | `tokens` | `[]TokenContext` | Accumulated tokens |
-| `current` | `strings.Builder` | Current token being built |
-| `wasSingleQuoted` | `bool` | Whether current token contains single-quoted content |
-| `inSingleQuotes` | `bool` | Currently inside single quotes |
-| `inDoubleQuotes` | `bool` | Currently inside double quotes |
+| `current` | `strings.Builder` | Current word being built |
+| `sawWord` | `bool` | A word exists since the last boundary (content appended OR a quote pair seen) |
+| `wasSingleQuoted` | `bool` | Current word contains single-quoted content |
+| `wasQuoted` | `bool` | Current word contains quoted content (any quote type) |
+| `inSingleQuotes` | `bool` | Single quote open in the CURRENT context |
+| `inDoubleQuotes` | `bool` | Double quote open in the CURRENT context |
+| `inBacktickBody` | `bool` | Current context is a backtick substitution body |
+| `dollarParenDepth` | `int` | Open `$(` count |
+| `contextStack` | stack | Saved quote state per substitution level (§7.1 rule 4) |
 
 ### 10.2 Processing Loop
 
 ```
 for each rune c in input:
+    inBody := dollarParenDepth > 0 OR inBacktickBody
+
     if c == '\\' AND NOT inSingleQuotes AND has next char:
-        process escape sequence
+        if inBody: append '\\' and the next char verbatim (no conversion)
+        else:      append the escape result (§5; \$ and \` gain the marker)
+        skip next char; sawWord = true
         continue
 
-    if c == '\'' AND NOT inDoubleQuotes:
-        if NOT inSingleQuotes: wasSingleQuoted = true
+    if c == '$' AND next char == '(' AND NOT inSingleQuotes:
+        push {inSingleQuotes, inDoubleQuotes, inBacktickBody}; clear all three
+        dollarParenDepth++
+        append "$("; skip '('; sawWord = true
+        continue
+
+    if c == ')' AND dollarParenDepth > 0
+              AND NOT inSingleQuotes AND NOT inDoubleQuotes AND NOT inBacktickBody:
+        dollarParenDepth--
+        pop context (restore enclosing quote state)
+        append ')'
+        continue
+
+    if c == '`' AND NOT inSingleQuotes:
+        if inBacktickBody:  pop context           // closing backtick (pure toggle)
+        else:               push context; clear; inBacktickBody = true
+        append '`'; sawWord = true
+        continue
+
+    if c == '\'' AND NOT inDoubleQuotes AND NOT inBacktickBody:
         toggle inSingleQuotes
+        if inBody: append '\''                    // body content, verbatim, no flags
+        else:
+            sawWord = true                        // delimiter not appended
+            wasSingleQuoted = true; wasQuoted = true
         continue
 
     if c == '"' AND NOT inSingleQuotes:
         toggle inDoubleQuotes
+        if inBody: append '"'                     // body content, verbatim, no flags
+        else:
+            sawWord = true                        // delimiter not appended
+            wasQuoted = true
         continue
 
-    if isSpace(c) AND NOT inSingleQuotes AND NOT inDoubleQuotes:
-        if current has content:
-            emit token
-            reset current and wasSingleQuoted
+    if c is an operator character (| & ; < >)
+              AND NOT inSingleQuotes AND NOT inDoubleQuotes AND NOT inBody:
+        if c == '&' AND next char != '&':
+            fall through                          // lone & is a literal character
+        else:
+            flush current word (emit token if sawWord)
+            reset current, flags, sawWord
+            lex operator by maximal munch (§3.3), applying the 2>/2>> rule
+            emit {Content: operator, IsOperator: true}
+            continue
+
+    if isSpace(c) AND NOT inSingleQuotes AND NOT inDoubleQuotes AND NOT inBody:
+        if sawWord: emit {Content: current, wasSingleQuoted, wasQuoted}
+        reset current, flags, sawWord             // flags reset even if nothing emitted
         continue
 
-    append c to current
+    append c to current; sawWord = true
 ```
 
 ### 10.3 Post-Loop Processing
 
 After the loop:
 
-1. Check for unclosed single quotes -> return error
-2. Check for unclosed double quotes -> return error
-3. If `current` has content, emit final token
-4. Return token slice
+1. `inSingleQuotes` -> error `unclosed single quote (odd count)`
+2. `inDoubleQuotes` -> error `unclosed double quote (odd count)`
+3. `inBacktickBody` -> error `unclosed backtick (odd count)`
+4. `dollarParenDepth > 0` -> error `unclosed command substitution $(...)`
+5. If `sawWord`, emit the final token
+6. Return token slice
 
 ### 10.4 Complexity
 
@@ -554,27 +673,29 @@ After the loop:
 
 The parser calls `lexer.Tokenize(input)` and receives `[]TokenContext`. It then:
 
-1. Iterates through tokens
-2. Checks if each token is an operator using `parseOperator()`
-3. For non-operators, applies expansions (tilde, environment, command substitution) unless `WasSingleQuoted`
-4. Strips escape markers after expansion
-5. Classifies as `Command` or `CommandArgument` based on position
+1. Maps tokens marked `IsOperator: true` to formal operator types by content. The parser NEVER re-derives operators from content: a token whose `Content` is `|` but whose `IsOperator` is `false` (because it was quoted or escaped) is an ordinary value token.
+2. For value tokens, applies expansions (tilde, environment, command substitution) unless `WasSingleQuoted`; tilde expansion is additionally suppressed by `WasQuoted`
+3. Strips escape markers — unconditionally, for every value token
+4. Classifies as `Command` or `CommandArgument` based on position
 
 ### 11.2 Expansion Suppression
 
-The `WasSingleQuoted` flag controls expansion:
+The quoting flags control expansion:
 
 ```go
 if !tc.WasSingleQuoted {
-    expandedValue = expander.ExpandTilde(expandedValue)
+    if !tc.WasQuoted {
+        expandedValue = expander.ExpandTilde(expandedValue)
+    }
     expandedValue = expander.ExpandEnvironment(expandedValue)
     // ... command substitution if executor provided
 }
+// Marker stripping happens AFTER this block, for every value token (§11.3)
 ```
 
 ### 11.3 Escape Marker Stripping
 
-After all expansions, escape markers are removed:
+After all expansions, escape markers are removed. Stripping is UNCONDITIONAL — it applies to every value token, including single-quoted tokens (a concatenation such as `'a'\$HOME` carries a marker inside a `WasSingleQuoted` token):
 
 ```go
 expandedValue = lexer.StripEscapeMarkers(expandedValue)
@@ -590,9 +711,9 @@ This converts `\x01$VAR` to `$VAR` (literal dollar sign, not expanded).
 
 ```
 Input:  ls -la /home/user
-Lexer:  [{Content: "ls", WasSingleQuoted: false},
-         {Content: "-la", WasSingleQuoted: false},
-         {Content: "/home/user", WasSingleQuoted: false}]
+Lexer:  [{Content: "ls"},
+         {Content: "-la"},
+         {Content: "/home/user"}]
 Parser: [Command("ls"), CommandArgument("-la"), CommandArgument("/home/user")]
 ```
 
@@ -600,10 +721,10 @@ Parser: [Command("ls"), CommandArgument("-la"), CommandArgument("/home/user")]
 
 ```
 Input:  git commit -m "Fix bug in parser"
-Lexer:  [{Content: "git", WasSingleQuoted: false},
-         {Content: "commit", WasSingleQuoted: false},
-         {Content: "-m", WasSingleQuoted: false},
-         {Content: "Fix bug in parser", WasSingleQuoted: false}]
+Lexer:  [{Content: "git"},
+         {Content: "commit"},
+         {Content: "-m"},
+         {Content: "Fix bug in parser", WasQuoted: true}]
 Parser: [Command("git"), CommandArgument("commit"),
          CommandArgument("-m"), CommandArgument("Fix bug in parser")]
 ```
@@ -612,8 +733,8 @@ Parser: [Command("git"), CommandArgument("commit"),
 
 ```
 Input:  echo '$HOME is not expanded'
-Lexer:  [{Content: "echo", WasSingleQuoted: false},
-         {Content: "$HOME is not expanded", WasSingleQuoted: true}]
+Lexer:  [{Content: "echo"},
+         {Content: "$HOME is not expanded", WasSingleQuoted: true, WasQuoted: true}]
 Parser: [Command("echo"), CommandArgument("$HOME is not expanded")]
 // Note: $HOME remains literal due to WasSingleQuoted
 ```
@@ -622,9 +743,9 @@ Parser: [Command("echo"), CommandArgument("$HOME is not expanded")]
 
 ```
 Input:  echo hello\ world \$HOME
-Lexer:  [{Content: "echo", WasSingleQuoted: false},
-         {Content: "hello world", WasSingleQuoted: false},
-         {Content: "\x01$HOME", WasSingleQuoted: false}]
+Lexer:  [{Content: "echo"},
+         {Content: "hello world"},
+         {Content: "\x01$HOME"}]
 Parser: [Command("echo"), CommandArgument("hello world"),
          CommandArgument("$HOME")]
 // Note: Space preserved by escape, $HOME literal due to escape marker
@@ -633,27 +754,30 @@ Parser: [Command("echo"), CommandArgument("hello world"),
 ### 12.5 Pipeline with Redirection
 
 ```
-Input:  cat input.txt | grep error > output.log
-Lexer:  [{Content: "cat", WasSingleQuoted: false},
-         {Content: "input.txt", WasSingleQuoted: false},
-         {Content: "|", WasSingleQuoted: false},
-         {Content: "grep", WasSingleQuoted: false},
-         {Content: "error", WasSingleQuoted: false},
-         {Content: ">", WasSingleQuoted: false},
-         {Content: "output.log", WasSingleQuoted: false}]
+Input:  cat input.txt | grep error>output.log
+Lexer:  [{Content: "cat"},
+         {Content: "input.txt"},
+         {Content: "|", IsOperator: true},
+         {Content: "grep"},
+         {Content: "error"},
+         {Content: ">", IsOperator: true},
+         {Content: "output.log"}]
 Parser: [Command("cat"), CommandArgument("input.txt"), Pipe,
          Command("grep"), CommandArgument("error"), RedirectStdOut,
          CommandArgument("output.log")]
+// The operators are recognized with or without surrounding whitespace
 ```
 
 ### 12.6 Complex Quoting
 
 ```
 Input:  echo "Hello, "'"'"$USER"'"'"!"
-Lexer:  [{Content: "echo", WasSingleQuoted: false},
-         {Content: "Hello, '\"$USER\"'!", WasSingleQuoted: true}]
-// The complex quoting produces: Hello, '"$USER"'!
-// WasSingleQuoted is true because single quotes were used
+Lexer:  [{Content: "echo"},
+         {Content: "Hello, \"$USER\"!", WasSingleQuoted: true, WasQuoted: true}]
+// Segments: "Hello, " -> Hello,_   '"' -> "   "$USER" -> $USER   '"' -> "   "!" -> !
+// All quote DELIMITERS are removed; the single-quoted segments contribute
+// literal " characters. WasSingleQuoted is true, so NO expansion occurs.
+// The argument is exactly:  Hello, "$USER"!
 ```
 
 ---
@@ -664,7 +788,7 @@ Foundation Shell's lexer differs from POSIX shell in several ways:
 
 | Feature | POSIX Shell | Foundation Shell |
 |---------|-------------|------------------|
-| Operator tokenization | During lexing | During parsing |
+| `&` background operator | Supported | Not an operator (literal character) |
 | `#` comments | Supported | Not supported |
 | Line continuation (`\newline`) | Joins lines | Not supported |
 | Here-documents (`<<`) | Supported | Not supported |
@@ -673,6 +797,8 @@ Foundation Shell's lexer differs from POSIX shell in several ways:
 | Brace expansion (`{a,b}`) | Bash extension | Not supported |
 | Word splitting after expansion | Supported | Not supported |
 | Glob/pathname expansion | Supported | Not supported |
+
+For the quoting/expansion model differences (whole-token expansion suppression, whole-token tilde suppression, and others), see quoting.md §13 — those differences are deliberate.
 
 ---
 
@@ -700,20 +826,22 @@ func Tokenize(input string) ([]TokenContext, error)
 - `input`: The shell command string to tokenize
 
 **Returns:**
-- `[]TokenContext`: Slice of tokens with content and quoting metadata
-- `error`: Non-nil if unclosed quotes detected
+- `[]TokenContext`: Slice of tokens with content, quoting metadata, and operator marking
+- `error`: Non-nil if an unclosed quote or unclosed command substitution is detected
 
 **Behavior:**
 - Empty input returns `nil, nil` (no tokens, no error)
 - Whitespace-only input returns `nil, nil`
-- Unclosed quotes return `nil, error`
+- Unclosed quotes or substitutions return `nil, error` (canonical strings, §9)
 
 ### 15.2 TokenContext Structure
 
 ```go
 type TokenContext struct {
-    Content         string  // Token text with escapes processed
+    Content         string  // Token text (escapes processed, quote delimiters removed)
     WasSingleQuoted bool    // True if any part was single-quoted
+    WasQuoted       bool    // True if any part was inside any quotes
+    IsOperator      bool    // True if the lexer recognized this token as an operator
 }
 ```
 
@@ -727,7 +855,7 @@ func StripEscapeMarkers(s string) string
 - `s`: String potentially containing escape markers (`\x01`)
 
 **Returns:**
-- String with all `\x01` characters removed
+- String with all `\x01` characters removed (see §5.1.4 for the reserved-byte caveat)
 
 ### 15.4 EscapeMarker Constant
 
@@ -735,4 +863,4 @@ func StripEscapeMarkers(s string) string
 const EscapeMarker = '\x01'  // ASCII SOH (Start of Heading)
 ```
 
-Used to mark escaped dollar signs that should not be expanded.
+Used to mark escaped dollar signs and escaped backticks that should not be expanded.
