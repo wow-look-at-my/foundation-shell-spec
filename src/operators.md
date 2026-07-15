@@ -6,7 +6,9 @@ recommend_after: parser.md
 
 # Operators Specification
 
-This document provides the exhaustive specification for Foundation Shell operators. This specification is the authoritative source of truth for operator behavior.
+> **Canonical for:** chain operator semantics (`|`, `&&`, `||`, `;`), precedence, and operator-related error cases. The authority map lives in the README.
+
+This document provides the exhaustive specification for Foundation Shell's chain operators. (Operator *tokenization* — maximal munch, no whitespace required, quoting/escaping immunity — is specified in lexer.md §3.3.)
 
 ## Table of Contents
 
@@ -552,19 +554,25 @@ cmd ;
 
 ### Missing Operands
 
-Operators must have valid commands on both sides.
+A chain operator with a missing operand is reported by the position rules above — there is no separate "missing operand" error:
 
 ```bash
-# ERROR: empty command (left side)
-| cmd
+| cmd     # ERROR: unexpected operator at start: |
+cmd |     # ERROR: unexpected operator at end: |
+```
 
-# ERROR: empty command (right side)
-cmd |
+The `empty command` error is distinct: it applies when a command consists of redirections only, with no words at all:
+
+```bash
+# ERROR: empty command (redirection-only command)
+> file
 ```
 
 **Error Message:** `empty command`
 
 **Error Code:** Parse error, exit code 1
+
+(Canonical error strings: diagnostics.md §5.2.)
 
 ### Consecutive Operators
 
@@ -600,10 +608,10 @@ An empty command line or whitespace-only input is an error (for parse operations
 
 | Error Condition         | Example          | Error Message                    |
 |-------------------------|------------------|----------------------------------|
-| Operator at start       | `\| cmd`         | unexpected operator at start     |
-| Operator at end         | `cmd &&`         | unexpected operator at end       |
-| Empty command           | `cmd \| \| other`| empty command                    |
-| Consecutive operators   | `cmd && \|\| x`  | consecutive operators            |
+| Operator at start       | `\| cmd`         | unexpected operator at start: \| |
+| Operator at end         | `cmd &&`         | unexpected operator at end: &&   |
+| Empty command           | `> file`         | empty command                    |
+| Consecutive operators   | `cmd \| \| x`    | consecutive operators: \| followed by \| |
 | Empty input             | (empty string)   | empty input                      |
 
 ---
@@ -692,12 +700,12 @@ Foundation Shell operators follow POSIX shell semantics with these characteristi
 2. **Short-circuit evaluation**: AND/OR behave per POSIX specification
 3. **Left-to-right evaluation**: Matches POSIX evaluation order
 4. **Precedence**: Pipes bind tighter than logical operators (POSIX compliant)
+5. **Trailing semicolon**: allowed and consumed, like bash and POSIX shells (parser.md)
 
 ### Differences from Bash
 
 1. **No `pipefail`**: Foundation Shell does not support `set -o pipefail`
 2. **No `PIPESTATUS`**: No array of individual pipeline exit codes
-3. **Trailing semicolon**: Foundation Shell allows trailing `;` (like bash)
 
 ### Future Considerations
 
