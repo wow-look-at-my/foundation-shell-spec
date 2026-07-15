@@ -1,6 +1,6 @@
 ---
 title: Lexer Specification
-description: Tokenization rules, operator recognition, command-substitution-aware scanning, escape sequences, and quote state tracking.
+description: Tokenization rules, operator recognition, command-substitution-aware scanning, newline separators, comments, escape sequences, and quote state tracking.
 ---
 
 # Lexer Specification
@@ -9,7 +9,7 @@ description: Tokenization rules, operator recognition, command-substitution-awar
 
 ## 1. Overview
 
-The lexer (tokenizer) is the first stage of Foundation Shell's input processing pipeline. It transforms raw input strings into a sequence of tokens that preserve semantic information about quoting context. The lexer operates as a single-pass scanner that handles escape sequences, quote state tracking, operator recognition, command-substitution scanning, and whitespace-based token separation.
+The lexer (tokenizer) is the first stage of Foundation Shell's input processing pipeline. It transforms raw input strings into a sequence of tokens that preserve semantic information about quoting context. The lexer operates as a single-pass scanner that handles escape sequences, quote state tracking, operator recognition, command-substitution scanning, `#` comments, and whitespace-based token separation — including newlines as command separators.
 
 ### 1.1 Design Philosophy
 
@@ -119,11 +119,13 @@ The lexer uses Go's `unicode.IsSpace()` to identify whitespace, which includes:
 - Carriage return (U+000D)
 - Various Unicode space characters
 
+Newline is special: at total depth 0 it not only separates words but also separates COMMANDS (§3.4). Every other whitespace character only separates words.
+
 #### 3.1.2 Whitespace Behavior
 
 | Context | Behavior |
 |---------|----------|
-| Outside quotes and substitutions | Terminates current token, starts new token |
+| Outside quotes and substitutions | Terminates current token, starts new token (a newline additionally separates commands, §3.4) |
 | Inside single quotes | Preserved literally as part of token |
 | Inside double quotes | Preserved literally as part of token |
 | Inside `$(...)` or backticks | Preserved literally as part of token |
@@ -216,6 +218,55 @@ echo \|     -> [echo, {Content: "|", IsOperator: false}]   literal argument
 ```
 
 The parser maps operator tokens to formal token types by content (see parser.md), but ONLY for tokens the lexer marked with `IsOperator: true`.
+
+### 3.4 Newlines Separate Commands
+
+An unquoted, unescaped newline at total depth 0 (outside every quote region and substitution body — quoting.md §5.4) is a COMMAND SEPARATOR, not plain whitespace. The lexer treats it as a *soft* `;`:
+
+1. The current word (if any) is flushed as a token, exactly as for other whitespace
+2. A pending-separator flag is set. A run of newlines — with or without other whitespace and comments (§8) between them — sets it once
+3. When the NEXT token is about to be emitted, the pending separator first materializes as a semicolon operator token (`{Content: ";", IsOperator: true}`) — UNLESS no token has been emitted yet, or the most recently emitted token is a chain operator (`|`, `&&`, `||`, `;`)
+
+The suppression cases make the newline a forgiving separator:
+
+- Leading blank lines (and comment-only lines) produce nothing
+- Blank lines between commands collapse into ONE separator
+- A trailing newline produces nothing (no token follows it)
+- After a chain operator, a newline is a CONTINUATION: `cmd1 &&<newline>cmd2` behaves exactly like `cmd1 && cmd2`, and `cmd1 ;<newline>cmd2` does not produce consecutive operators
+
+After a REDIRECTION operator the separator is NOT suppressed: `cmd ><newline>file` lexes as `cmd`, `>`, `;`, `file`, and the parser reports `missing redirection target: > followed by operator ;` — a redirection cannot be continued across an unescaped newline (as in POSIX shells).
+
+Newlines inside quote regions or substitution bodies are content, preserved in the token (§3.1.2). The escape sequence `\<newline>` is NOT line continuation (§13); per the escape table it produces a literal newline character inside the word.
+
+#### 3.4.1 Examples
+
+(`\n` below denotes a real newline character in the input.)
+
+```
+Input: "echo a\necho b"
+Tokens: [echo, a, {Content: ";", IsOperator: true}, echo, b]
+
+Input: "echo a\n\n\necho b"
+Tokens: [echo, a, {Content: ";", IsOperator: true}, echo, b]
+// Blank lines collapse into one separator
+
+Input: "\n\necho hi\n"
+Tokens: [echo, hi]
+// Leading and trailing newlines produce no separator
+
+Input: "echo a &&\necho b"
+Tokens: [echo, a, {Content: "&&", IsOperator: true}, echo, b]
+// Continuation: separator suppressed after a chain operator
+
+Input: "echo 'a\nb'"
+Tokens: [echo, {Content: "a\nb", WasSingleQuoted: true, WasQuoted: true}]
+// Quoted newline is token content
+
+Input: "echo $(echo a\necho b)"
+Tokens: [echo, {Content: "$(echo a\necho b)"}]
+// Newline inside a substitution body is body content; it separates the
+// body's own commands when the body is re-parsed
+```
 
 ---
 
@@ -488,17 +539,19 @@ Tokens: [{Content: "echo"}, {Content: "$(date)", WasQuoted: true}]
 
 ### 7.3 Nested Substitutions
 
-The expander processes nested substitutions innermost-first:
+Nested substitutions execute through RECURSION, not through textual re-scanning (expansion.md §Command Substitution):
 
 ```
 $(echo $(date))
 ```
 
 Processing order:
-1. Find innermost `$(date)`
-2. Execute `date`, replace with output
-3. Find remaining `$(echo <output>)`
-4. Execute, replace with final output
+1. The expander finds the outer `$(...)` and hands its body `echo $(date)` to the executor
+2. The executor re-parses the body with the same parser; expanding the body's tokens finds the inner `$(date)`
+3. `date` executes; its output replaces the inner substitution
+4. `echo <output>` executes; its output replaces the outer substitution
+
+Syntactically inner substitutions therefore complete first — but substitution OUTPUT is never re-scanned for further substitutions (expansion.md §Single-Pass Expansion).
 
 ### 7.4 Substitution Expansion Prevention
 
@@ -512,20 +565,33 @@ Command substitutions are NOT expanded when:
 
 ## 8. Comment Handling
 
-**Foundation Shell does NOT currently implement comment handling in the lexer.**
+The `#` character begins a comment when it appears at the START of a word: unquoted, unescaped, outside every quote region and substitution body, with no pending word content (§10.1: `sawWord` is false). The comment extends to — and not including — the next newline, or to end of input. Comment text is discarded; it produces no tokens.
 
-The `#` character is treated as a regular character and becomes part of tokens:
+A `#` anywhere else is a literal character:
+
+| Context | Behavior |
+|---------|----------|
+| Start of a word (`echo hi # note`) | Comment — `# note` discarded |
+| Start of input (`# comment`) | Comment |
+| Shebang line (`#!/usr/bin/env fsh`) | Ordinary comment — script files need no special first-line handling |
+| Inside a word (`echo a#b`) | Literal: token `a#b` |
+| Immediately after a quote pair (`echo ""#x`) | Literal: the quote pair starts the word, so `#x` joins it |
+| Inside quotes (`echo '#nope'`, `echo "#nope"`) | Literal content |
+| Inside a substitution body (`echo $(echo '#')`) | Body content, preserved verbatim (§7.1) |
+| Escaped (`echo \#tag`) | Literal: token `#tag` |
+
+The newline that ends a comment is processed normally (§3.4), so a full-line comment between two commands leaves exactly one separator:
 
 ```
-Input: echo hello # this is not a comment
-Tokens: ["echo", "hello", "#", "this", "is", "not", "a", "comment"]
+Input: "echo a\n# a note\necho b"
+Tokens: [echo, a, {Content: ";", IsOperator: true}, echo, b]
+
+Input: "#!/usr/bin/env fsh\necho hi"
+Tokens: [echo, hi]
+
+Input: "echo hello # this IS a comment"
+Tokens: [echo, hello]
 ```
-
-If comment support is added in the future, the typical shell behavior would be:
-
-- `#` outside quotes begins a comment
-- Everything from `#` to end of line is ignored
-- `#` inside quotes is literal
 
 ---
 
@@ -586,6 +652,7 @@ The lexer maintains these state variables:
 | `tokens` | `[]TokenContext` | Accumulated tokens |
 | `current` | `strings.Builder` | Current word being built |
 | `sawWord` | `bool` | A word exists since the last boundary (content appended OR a quote pair seen) |
+| `pendingNewline` | `bool` | A depth-0 newline was seen; a `;` operator token materializes before the next emitted token (§3.4) |
 | `wasSingleQuoted` | `bool` | Current word contains single-quoted content |
 | `wasQuoted` | `bool` | Current word contains quoted content (any quote type) |
 | `singleQuoteDepth` | `int` | Open single-quote regions in the CURRENT context (quoting.md §5.1) |
@@ -599,6 +666,17 @@ The three quote depths follow the open/nest/close rule (quoting.md §5.2, expose
 ### 10.2 Processing Loop
 
 The quote branches call `quoteAction(input, i, depth)` — the shared open/nest/close decision of quoting.md §5.2.2.
+
+Every token emission — in the loop and in the post-loop flush — goes through one helper that first materializes a pending newline separator (§3.4):
+
+```
+emit(tok):
+    if pendingNewline:
+        pendingNewline = false
+        if len(tokens) > 0 AND last emitted token is not a chain operator (|, &&, ||, ;):
+            tokens.append({Content: ";", IsOperator: true})
+    tokens.append(tok)
+```
 
 ```
 for each rune c at index i in input:
@@ -666,6 +744,11 @@ for each rune c at index i in input:
             // else: outermost open/close - delimiter, not appended
         continue
 
+    if c == '#' AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0
+              AND NOT inBody AND NOT sawWord:      // comment (§8): only at word start
+        skip runes up to (not including) the next '\n' or end of input
+        continue                                   // the ending newline is processed normally
+
     if c is an operator character (| & ; < >)
               AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0 AND NOT inBody:
         if c == '&' AND next char != '&':
@@ -676,6 +759,12 @@ for each rune c at index i in input:
             lex operator by maximal munch (§3.3), applying the 2>/2>> rule
             emit {Content: operator, IsOperator: true}
             continue
+
+    if c == '\n' AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0 AND NOT inBody:
+        if sawWord: emit {Content: current, wasSingleQuoted, wasQuoted}
+        reset current, flags, sawWord
+        pendingNewline = true                     // separator materializes on next emit (§3.4)
+        continue
 
     if isSpace(c) AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0 AND NOT inBody:
         if sawWord: emit {Content: current, wasSingleQuoted, wasQuoted}
@@ -689,7 +778,8 @@ Notes:
 
 - The `'` and `"` branches strip only the OUTERMOST delimiters (Open from depth 0, Close to depth 0) outside substitution bodies; nested quote characters stay in the token (quoting.md §5.2 rule 3, §8.2).
 - A backtick's Open/Close (0↔1) transitions push/pop the context stack; Nest and nested Close do not — nested backticks are body content, re-parsed recursively at execution (§7.1, quoting.md §6.3).
-- In the whitespace and operator guards, "all quote depths 0 AND NOT inBody" is exactly the total-depth-0 condition of quoting.md §5.4.
+- In the whitespace, newline, comment, and operator guards, "all quote depths 0 AND NOT inBody" is exactly the total-depth-0 condition of quoting.md §5.4.
+- The newline branch must precede the generic whitespace branch (a newline satisfies `isSpace`).
 
 ### 10.3 Post-Loop Processing
 
@@ -699,10 +789,10 @@ After the loop (checks run in this order; the first match is the single error re
 2. `doubleQuoteDepth > 0` -> error `unclosed double quote`
 3. `backtickDepth > 0` -> error `unclosed backtick`
 4. `dollarParenDepth > 0` -> error `unclosed command substitution $(...)`
-5. If `sawWord`, emit the final token
+5. If `sawWord`, emit the final token (through `emit`, so a pending separator still materializes before it)
 6. Return token slice
 
-(The depths inspected are the current — innermost — context's; input that ends inside a substitution body reports the body's open quote region first, then the enclosing substitution.)
+(The depths inspected are the current — innermost — context's; input that ends inside a substitution body reports the body's open quote region first, then the enclosing substitution. A `pendingNewline` still set after step 5 is simply discarded — a trailing newline produces no token.)
 
 ### 10.4 Complexity
 
@@ -833,8 +923,9 @@ Foundation Shell's lexer differs from POSIX shell in several ways:
 | Feature | POSIX Shell | Foundation Shell |
 |---------|-------------|------------------|
 | `&` background operator | Supported | Not an operator (literal character) |
-| `#` comments | Supported | Not supported |
-| Line continuation (`\newline`) | Joins lines | Not supported |
+| `#` comments | Supported | Supported (word-start rule, §8) |
+| Newline separator | Hard list terminator | Soft `;` with continuation after chain operators (§3.4) |
+| Line continuation (`\newline`) | Joins lines | Not supported (`\<newline>` is a literal newline in the word) |
 | Here-documents (`<<`) | Supported | Not supported |
 | Process substitution (`<()`) | Bash extension | Not supported |
 | Arithmetic expansion (`$(())`) | Supported | Not supported |
@@ -850,11 +941,10 @@ For quoting-level differences from POSIX (quote nesting and related behavior), s
 
 Potential enhancements for the lexer:
 
-1. **Comment Support**: Add `#` comment handling
-2. **Line Continuation**: Support `\` at end of line to continue
-3. **Here-Documents**: Support `<<` and `<<-` syntax
-4. **Glob Preservation**: Mark tokens containing glob characters
-5. **Position Tracking**: Add line/column information to tokens for better error messages
+1. **Line Continuation**: Support `\` at end of line to continue
+2. **Here-Documents**: Support `<<` and `<<-` syntax
+3. **Glob Preservation**: Mark tokens containing glob characters
+4. **Position Tracking**: Add line/column information to tokens for better error messages
 
 ---
 
