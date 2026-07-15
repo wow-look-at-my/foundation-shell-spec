@@ -7,7 +7,7 @@
 | `\$` | `$` (marked) | Escaped dollar (marked to prevent expansion) |
 | `\"` | `"` | Literal double quote |
 | `\'` | `'` | Literal single quote |
-| `\`` | `` ` `` | Literal backtick |
+| `` \` `` | `` ` `` (marked) | Escaped backtick (marked to prevent command substitution) |
 | `\n` | newline (0x0A) | Newline character |
 | `\t` | tab (0x09) | Tab character |
 | `\X` (any other) | `X` | The character itself (backslash removed) |

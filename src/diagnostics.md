@@ -6,9 +6,7 @@ recommend_after: highlighting.md
 
 # Foundation Shell Diagnostic Output Specification
 
-Version: 1.0
-Status: Authoritative
-Source of Truth: This specification
+> **Canonical for:** diagnostic output formatting (caret blocks) and the canonical error-string table (§5) used by the analyzer, lexer, and parser. The authority map lives in the README.
 
 This document is the exhaustive specification for Foundation Shell's diagnostic output system. Tests MUST validate against this specification. Any behavior not documented here is undefined.
 
@@ -83,19 +81,19 @@ The third line begins with the literal string `error: ` followed by the error me
 
 **Example:**
 ```
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ### 2.4 Complete Single Error Example
 
 Input: `echo "hello`
-Error: Start=5, End=11, Message="unclosed double quote (odd count)"
+Error: Start=5, End=11, Message="unclosed double quote"
 
 Output:
 ```
 echo "hello
      ^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ---
@@ -223,38 +221,50 @@ A minimum of 1 caret is always displayed, even for zero-length or invalid positi
 
 ---
 
-## 5. Standard Error Messages
+## 5. Standard Error Messages (Canonical Table)
 
-The following are the EXACT error messages produced by the syntax analyzer. Tests MUST match these strings exactly.
+This section is the ONE canonical error-string table for Foundation Shell. Every other specification file refers here instead of restating strings. Tests MUST match these strings exactly.
 
-### 5.1 Operator Errors
+### 5.1 Analyzer and Lexer Errors
+
+The syntax analyzer detects these conditions, and the execution lexer emits the IDENTICAL strings for the same conditions (lexer.md §9) — there is no second message universe:
 
 | Error | Exact Message |
 |-------|---------------|
+| Unclosed single quote | `unclosed single quote` |
+| Unclosed double quote | `unclosed double quote` |
+| Unclosed backtick | `unclosed backtick` |
+| Unclosed `$(...)` | `unclosed command substitution $(...)` |
+| Leading chain operator | `unexpected operator at start: <op>` |
 | Trailing pipe, &&, or \|\| | `unexpected operator at end` |
-| Leading operator (not currently implemented) | `unexpected operator at start` |
 | Missing file after redirect | `missing redirection target` |
 
-### 5.2 Quote Errors
+Leading-operator detection is REQUIRED of the analyzer (so `| foo` gets a caret diagnostic, not just the parser's plain error line). The unclosed-`$(...)` message was renamed from the earlier `unclosed subshell $(...)` — "subshell" is reserved for future `()` grouping.
 
-| Error | Exact Message |
-|-------|---------------|
-| Unclosed single quote | `unclosed single quote (odd count)` |
-| Unclosed double quote | `unclosed double quote (odd count)` |
-| Unclosed backtick | `unclosed backtick (odd count)` |
+### 5.2 Parser Errors
 
-### 5.3 Subshell Errors
+The parser reports these exact strings (the `<...>` placeholders are filled with the offending token text):
 
-| Error | Exact Message |
-|-------|---------------|
-| Unclosed $() | `unclosed subshell $(...)` |
+| Condition | Exact Message |
+|-----------|---------------|
+| Empty or whitespace-only input | `empty input` |
+| Chain operator at start | `unexpected operator at start: <op>` |
+| Trailing chain operator (other than `;`) | `unexpected operator at end: <op>` |
+| Consecutive chain operators | `consecutive operators: <op1> followed by <op2>` |
+| Redirection-only command (no words) | `empty command` |
+| Redirection at end of input | `missing redirection target: <op>` |
+| Redirection followed by an operator | `missing redirection target: <op> followed by operator <op2>` |
+| Redirection target empty after expansion | `empty redirection target` |
+| Unquoted redirection target starting with `&` | `file descriptor duplication is not supported: <word>` |
+| Lexer failure (wrapped) | `tokenization error: <lexer error>` |
+| Substitution failure (wrapped) | `command substitution error: <error>` |
 
-### 5.4 Message Format Notes
+### 5.3 Message Format Notes
 
 - All messages are lowercase
-- Messages use parenthetical clarification where helpful: `(odd count)`
 - Operator symbols in messages use the exact characters: `$(...)`
 - No trailing punctuation
+- The parser appends `: <op>` context to its operator errors; the analyzer's trailing-operator message carries no suffix (the caret already points at the operator)
 
 ---
 
@@ -306,7 +316,7 @@ Output:
 ```
 cat "unclosed
     ^^^^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ---
@@ -315,7 +325,7 @@ error: unclosed double quote (odd count)
 
 ### 7.1 Error Separation
 
-When multiple errors exist, each error block is separated by a single blank line.
+When multiple errors exist, each error block is separated by a single blank line. The complete output ends with exactly one trailing newline (also for a single error block).
 
 Format:
 ```
@@ -334,21 +344,23 @@ Errors are processed and displayed in the order they appear in the errors slice.
 
 ### 7.3 Example
 
-Input: `"unclosed && 'also`
+Two errors require two independently unclosed constructs. (A `'` inside open double quotes is literal — quoting.md §5.3 — so an input like `"unclosed && 'also` produces only ONE error, for the double quote.) An unclosed substitution containing an unclosed quote produces two:
+
+Input: `echo $(foo "bar`
 
 Errors:
-1. Start=0, End=9, Message="unclosed double quote (odd count)"
-2. Start=13, End=18, Message="unclosed single quote (odd count)"
+1. Start=5, End=15, Message="unclosed double quote"
+2. Start=5, End=15, Message="unclosed command substitution $(...)"
 
 Output:
 ```
-"unclosed && 'also
-^^^^^^^^^
-error: unclosed double quote (odd count)
+echo $(foo "bar
+     ^^^^^^^^^^
+error: unclosed double quote
 
-"unclosed && 'also
-             ^^^^^
-error: unclosed single quote (odd count)
+echo $(foo "bar
+     ^^^^^^^^^^
+error: unclosed command substitution $(...)
 ```
 
 ### 7.4 Same Line, Different Errors
@@ -425,41 +437,43 @@ echo 2>>
 error: missing redirection target
 ```
 
-### 8.3 Unclosed Single Quote (Odd Count)
+### 8.3 Unclosed Single Quote
 
 **Input:** `echo 'hello`
 
-**Analysis:** The token starting at position 5 has an odd number of single quotes.
+**Analysis:** The token starting at position 5 contains a single-quote region that is still open at end of input (quoting.md §5.5).
 
 **Output:**
 ```
 echo 'hello
      ^^^^^^
-error: unclosed single quote (odd count)
+error: unclosed single quote
 ```
 
-**Additional example with nested quotes:**
+**Additional example:**
 
-**Input:** `echo 'it's`
+**Input:** `echo 'it` (a single unclosed quote)
 
 **Output:**
 ```
-echo 'it's
-     ^^^^^
-error: unclosed single quote (odd count)
+echo 'it
+     ^^^
+error: unclosed single quote
 ```
 
-### 8.4 Unclosed Double Quote (Odd Count)
+(Note: `echo 'it's` would be VALID — the `'` in `it's` is attached to text on both sides, so it CLOSES the region (quoting.md §5.2); the command prints `its`. An even quote count alone proves nothing: `echo 'a 'b` has two quotes and is still unclosed, because the second one NESTS.)
+
+### 8.4 Unclosed Double Quote
 
 **Input:** `echo "hello`
 
-**Analysis:** The token starting at position 5 has an odd number of double quotes.
+**Analysis:** The token starting at position 5 contains a double-quote region that is still open at end of input (quoting.md §5.5).
 
 **Output:**
 ```
 echo "hello
      ^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 **Additional example:**
@@ -470,23 +484,23 @@ error: unclosed double quote (odd count)
 ```
 echo "a"b"
      ^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
-### 8.5 Unclosed Backtick (Odd Count)
+### 8.5 Unclosed Backtick
 
-**Input:** `echo \`hello`
+**Input:** ``echo `hello`` (the input is `echo`, a space, one backtick, `hello` — no backslash)
 
-**Analysis:** The token starting at position 5 has an odd number of backticks.
+**Analysis:** The token starting at position 5 contains a backtick substitution that is still open at end of input (quoting.md §5.5).
 
 **Output:**
-```
-echo \`hello
+~~~
+echo `hello
      ^^^^^^
-error: unclosed backtick (odd count)
-```
+error: unclosed backtick
+~~~
 
-### 8.6 Unclosed Subshell $(...)
+### 8.6 Unclosed Command Substitution $(...)
 
 **Input:** `echo $(date`
 
@@ -496,7 +510,7 @@ error: unclosed backtick (odd count)
 ```
 echo $(date
      ^^^^^^
-error: unclosed subshell $(...)
+error: unclosed command substitution $(...)
 ```
 
 **Additional example with content:**
@@ -507,7 +521,7 @@ error: unclosed subshell $(...)
 ```
 echo $(cat /etc/passwd
      ^^^^^^^^^^^^^^^^^
-error: unclosed subshell $(...)
+error: unclosed command substitution $(...)
 ```
 
 ---
@@ -586,7 +600,8 @@ func FormatDiagnostics(input string, errors []SyntaxError) string
 **Behavior:**
 - Returns `""` if `errors` is nil or empty
 - Processes each error sequentially
-- Separates multiple errors with newlines
+- Separates multiple error blocks with a blank line (§7.1)
+- Non-empty output ends with exactly one trailing newline
 
 ### 10.2 FormatDiagnosticsFromResult
 
@@ -613,7 +628,7 @@ func FormatDiagnosticsFromResult(result *AnalysisResult) string
 
 The `Analyze` function populates the `Errors` slice in `AnalysisResult` with `SyntaxError` structs. Error detection occurs:
 
-1. **During token parsing**: Unclosed quotes, backticks, and subshells
+1. **During token parsing**: Unclosed quotes, backticks, and command substitutions
 2. **After parsing completes**: Trailing operators and missing redirection targets
 
 ### 11.2 Error Position Accuracy
@@ -635,18 +650,18 @@ For valid input:
 
 Tests validating against this specification MUST:
 
-1. Match error messages exactly (case-sensitive)
+1. Match error messages exactly (case-sensitive) against the canonical table (§5)
 2. Verify caret count equals `End - Start` (minimum 1)
 3. Verify caret alignment starts at `Start` position
 4. Verify the three-line format for each error
-5. Verify newline separation between multiple errors
+5. Verify blank-line separation between multiple error blocks and the single trailing newline (§7.1)
 6. Handle edge cases per Section 9
 
 ### 12.1 Test Template
 
-```go
+~~~go
 func TestDiagnostic_ErrorName(t *testing.T) {
-    input := \`<input with error>\`
+    input := `<input with error>`
     result := Analyze(input)
 
     // Verify error detected
@@ -692,7 +707,7 @@ func TestDiagnostic_ErrorName(t *testing.T) {
         t.Error("missing error message")
     }
 }
-```
+~~~
 
 ---
 
@@ -700,6 +715,7 @@ func TestDiagnostic_ErrorName(t *testing.T) {
 
 | Condition | Message | Typical Start | Typical End |
 |-----------|---------|---------------|-------------|
+| Leading chain operator | `unexpected operator at start: <op>` | Operator position | Operator position + len(op) |
 | Trailing `\|` | `unexpected operator at end` | Operator position | Operator position + 1 |
 | Trailing `&&` | `unexpected operator at end` | Operator position | Operator position + 2 |
 | Trailing `\|\|` | `unexpected operator at end` | Operator position | Operator position + 2 |
@@ -708,19 +724,23 @@ func TestDiagnostic_ErrorName(t *testing.T) {
 | Missing redirect target `<` | `missing redirection target` | Operator position | Operator position + 1 |
 | Missing redirect target `2>` | `missing redirection target` | Operator position | Operator position + 2 |
 | Missing redirect target `2>>` | `missing redirection target` | Operator position | Operator position + 3 |
-| Odd single quotes | `unclosed single quote (odd count)` | Token start | Token end |
-| Odd double quotes | `unclosed double quote (odd count)` | Token start | Token end |
-| Odd backticks | `unclosed backtick (odd count)` | Token start | Token end |
-| Unclosed `$(` | `unclosed subshell $(...)` | Token start | Token end |
+| Unclosed single quote | `unclosed single quote` | Token start | Token end |
+| Unclosed double quote | `unclosed double quote` | Token start | Token end |
+| Unclosed backtick | `unclosed backtick` | Token start | Token end |
+| Unclosed `$(` | `unclosed command substitution $(...)` | Token start | Token end |
 
 ---
 
 ## Appendix B: ABNF Grammar for Diagnostic Output
 
 ```abnf
-diagnostic-output = *error-block
+diagnostic-output = error-block *(2LF error-block) LF
+                  ; blocks separated by a blank line (two LFs);
+                  ; output ends with exactly one trailing LF.
+                  ; With no errors the output is the empty string
+                  ; (this grammar covers one or more errors).
 
-error-block       = input-line LF caret-line LF error-line [LF]
+error-block       = input-line LF caret-line LF error-line
 
 input-line        = *CHAR  ; Original input line content
 
@@ -732,13 +752,7 @@ error-line        = "error: " message
 message           = 1*CHAR ; Error message text
 
 LF                = %x0A   ; Line feed
-CHAR              = %x01-09 / %x0B-0C / %x0E-7F  ; Any character except LF
+CHAR              = %x02-09 / %x0B-0C / %x0E-7F  ; Any character except LF
+                  ; (%x01 is excluded: U+0001 is the reserved escape
+                  ;  marker byte - see lexer.md 5.1.4)
 ```
-
----
-
-## Appendix C: Revision History
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2024 | Initial specification |

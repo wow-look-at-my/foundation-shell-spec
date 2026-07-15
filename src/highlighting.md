@@ -6,14 +6,7 @@ recommend_after: execution.md
 
 # Foundation Shell Syntax Highlighting Specification
 
-**Version:** 1.0
-**Status:** Authoritative
-**Source Files:**
-- `/go/internal/syntax/analyzer.go`
-- `/go/internal/syntax/highlighter.go`
-- `/go/internal/syntax/diagnostics.go`
-
-This specification is the **source of truth** for Foundation Shell's syntax highlighting system. All implementations MUST conform to this specification.
+> **Canonical for:** the syntax analyzer, semantic token types, the theme system, and REPL highlighting. The authority map lives in the README. (Implementation: `src/internal/syntax/` in the foundation-shell repository.)
 
 ---
 
@@ -84,13 +77,15 @@ const (
     TypeSingleQuotedString
     TypeDoubleQuotedString
     TypeBacktick
-    TypeSubshell
+    TypeCommandSubst
     TypeVariable
     TypeParenGroup
     TypeError
     TypeWhitespace
 )
 ```
+
+(`TypeCommandSubst` was formerly named `TypeSubshell`; it was renamed because `$(...)` is command substitution — "subshell" is reserved for future `( ... )` command grouping.)
 
 #### AnalyzedToken
 
@@ -102,7 +97,7 @@ type AnalyzedToken struct {
     Value string        // Raw text of token
     Start int           // Character position (0-indexed, inclusive)
     End   int           // Character position (exclusive)
-    Depth int           // Nesting depth for quotes/parens/subshells
+    Depth int           // Max nesting level reached in this token (quotes + command substitutions) — §9.4
 }
 ```
 
@@ -260,13 +255,13 @@ cat < input.txt     # "input.txt" is TypeRedirectionTarget
 - Single quotes do NOT interpret escape sequences
 - Single quotes do NOT expand variables
 
-**Depth Tracking:** Single quotes use depth counting. An odd count indicates an unclosed quote.
+**Depth Tracking:** Single quotes use the open/nest/close depth rule (§9.2; canonical: quoting.md §5.2). A region still open at end of input is an unclosed-quote error — possible even with an even quote count.
 
 **Examples:**
 ```sh
-echo 'hello world'      # "'hello world'" is TypeSingleQuotedString
-echo 'it's 'cool''      # Valid with depth-tracked nesting (depth goes 1->2->1->0)
-echo 'hello             # TypeError (odd count = unclosed)
+echo 'hello world'        # "'hello world'" is TypeSingleQuotedString
+echo 'it 'really' works'  # One token; the nested pair stays literal (depth 1->2->1->0)
+echo 'hello               # TypeError (region still open at end of input)
 ```
 
 ### 3.7 TypeDoubleQuotedString
@@ -279,7 +274,7 @@ echo 'hello             # TypeError (odd count = unclosed)
 - Escape sequences ARE processed (e.g., `\"`, `\\`)
 - Variables ARE expanded within double quotes (but the whole token is still TypeDoubleQuotedString)
 
-**Depth Tracking:** Double quotes use depth counting. An odd count indicates an unclosed quote.
+**Depth Tracking:** Double quotes use the same open/nest/close depth rule (§9.2).
 
 **Escape Handling:**
 - `\"` does NOT count toward quote depth
@@ -288,9 +283,9 @@ echo 'hello             # TypeError (odd count = unclosed)
 **Examples:**
 ```sh
 echo "hello world"           # "\"hello world\"" is TypeDoubleQuotedString
-echo "echo \"word\""         # Valid (escaped inner quotes)
-echo "outer "inner" outer"   # Valid with depth-tracked nesting
-echo "hello                  # TypeError (odd count = unclosed)
+echo "echo \"word\""         # Valid (escaped inner quotes never touch depth)
+echo "outer "inner" outer"   # Valid nesting (depth 1->2->1->0); nested pair stays literal
+echo "hello                  # TypeError (region still open at end of input)
 ```
 
 ### 3.8 TypeBacktick
@@ -302,7 +297,7 @@ echo "hello                  # TypeError (odd count = unclosed)
 - Content between backticks is executed as a command
 - The result replaces the backtick expression
 
-**Depth Tracking:** Backticks use depth counting for nested substitutions.
+**Depth Tracking:** Backticks use the same open/nest/close depth rule (§9.2); nested backticks execute recursively (quoting.md §6.3).
 
 **Context Rules:**
 - Backticks are NOT recognized inside single quotes
@@ -311,11 +306,11 @@ echo "hello                  # TypeError (odd count = unclosed)
 **Examples:**
 ```sh
 echo `date`              # "`date`" is TypeBacktick
-echo `echo `nested``     # Valid with depth-tracked nesting
-echo `unclosed           # TypeError (odd count = unclosed)
+echo `echo `nested``     # Valid nesting (depth 1->2->1->0); runs nested, then echo <output>
+echo `unclosed           # TypeError (region still open at end of input)
 ```
 
-### 3.9 TypeSubshell
+### 3.9 TypeCommandSubst
 
 **Definition:** Command substitution using `$(...)` syntax.
 
@@ -323,18 +318,19 @@ echo `unclosed           # TypeError (odd count = unclosed)
 - Starts with `$(`
 - Ends with matching `)`
 - Parentheses must be balanced
+- A `)` inside the body's open quotes does not close the substitution (lexer.md §7.1)
 
-**Depth Tracking:** Tracks parenthesis depth to handle nested subshells.
+**Depth Tracking:** Tracks parenthesis depth to handle nested substitutions.
 
 **Context Rules:**
-- Subshells are NOT recognized inside single quotes
-- Subshells ARE recognized inside double quotes
+- Command substitutions are NOT recognized inside single quotes
+- Command substitutions ARE recognized inside double quotes
 
 **Examples:**
 ```sh
-echo $(date)                 # "$(date)" is TypeSubshell
-echo $(date +%Y-%m-%d)       # "$(date +%Y-%m-%d)" is TypeSubshell
-echo $(echo $(pwd))          # Nested subshell (valid)
+echo $(date)                 # "$(date)" is TypeCommandSubst
+echo $(date +%Y-%m-%d)       # "$(date +%Y-%m-%d)" is TypeCommandSubst
+echo $(echo $(pwd))          # Nested substitution (valid)
 echo $(unclosed              # TypeError (unbalanced parens)
 ```
 
@@ -343,10 +339,9 @@ echo $(unclosed              # TypeError (unbalanced parens)
 **Definition:** Variable references.
 
 **Recognition Rules:**
-- Starts with `$` followed by:
-  - One or more alphanumeric characters or underscores: `$VAR`, `$_var`, `$var123`
-  - Braced expression: `${VAR}`, `${VAR:-default}`
-- Must have at least one character after `$`
+- A `$` starts a variable token ONLY when the next character is a letter (a-z, A-Z), an underscore, `{`, or `?`: `$VAR`, `$_var`, `${HOME}`, and the special parameter `$?` (expansion.md §Special Parameters)
+- `$(` starts a command substitution instead (§3.9)
+- Any other `$` (followed by a digit, punctuation, whitespace, or end of input) is a literal character within the word — `$1`, `$-foo`, and a trailing `$` are NOT variables
 
 **Context Rules:**
 - Variables are NOT expanded inside single quotes
@@ -359,15 +354,17 @@ echo $HOME               # "$HOME" is TypeVariable
 echo ${HOME}             # "${HOME}" is TypeVariable
 echo $PATH/bin           # "$PATH/bin" is TypeVariable (entire token)
 echo '$HOME'             # "'$HOME'" is TypeSingleQuotedString (not variable)
+echo $?                  # "$?" is TypeVariable (special parameter)
+echo $1                  # "$1" is TypeArgument ($ + digit cannot start a name)
 ```
 
 ### 3.11 TypeParenGroup
 
-**Definition:** Parentheses used for grouping (not subshell).
+**Definition:** Bare parentheses outside a `$(...)` command substitution.
 
 **Recognition Rules:**
-- Single `(` or `)` character
-- Used for subshell grouping or command grouping
+- Single `(` or `)` character not belonging to a `$(...)` substitution
+- Reserved for command grouping — a FUTURE feature (operators.md); today such input does not execute
 
 **Examples:**
 ```sh
@@ -379,10 +376,10 @@ echo '$HOME'             # "'$HOME'" is TypeSingleQuotedString (not variable)
 **Definition:** Invalid or error regions in the input.
 
 **Trigger Conditions:**
-- Unclosed single quote (odd count)
-- Unclosed double quote (odd count)
-- Unclosed backtick (odd count)
-- Unclosed subshell `$(...)`
+- Unclosed single quote
+- Unclosed double quote
+- Unclosed backtick
+- Unclosed command substitution `$(...)`
 
 **Highlighting:** Error tokens are still highlighted (with error styling) to show the user exactly what is problematic.
 
@@ -426,7 +423,7 @@ func Analyze(input string) *AnalysisResult
 The `Analyze` function is the **single source of truth** for syntax analysis. It performs:
 1. Tokenization with semantic classification
 2. Position tracking for each token
-3. Depth tracking for nested constructs
+3. Quote/substitution state tracking for nested constructs
 4. Error detection and reporting
 
 ### 4.2 State Machine
@@ -451,17 +448,17 @@ type analyzer struct {
 2. **Main Loop:** For each character position:
    - If whitespace: consume and emit TypeWhitespace token
    - If operator: match longest operator, emit token, update state
-   - Otherwise: parse word (handles quotes, variables, subshells)
+   - Otherwise: parse word (handles quotes, variables, command substitutions)
 
 3. **Word Parsing:**
    - Track quote depths (single, double, backtick)
-   - Track subshell depth
+   - Track command-substitution depth
    - Handle escape sequences
    - Consume until word boundary (whitespace or operator)
 
 4. **Finalization:**
-   - Check for unclosed quotes (odd depth counts)
-   - Check for unclosed subshells
+   - Check for unclosed quotes (any depth counter still positive — §9.2)
+   - Check for unclosed command substitutions
    - Check for trailing operators (except `;`)
    - Check for missing redirection targets
 
@@ -473,15 +470,17 @@ Operators MUST be matched longest-first to avoid incorrect tokenization:
 2. 2-character: `&&`, `||`, `>>`, `2>`
 3. 1-character: `|`, `;`, `>`, `<`, `(`, `)`
 
+`2>` and `2>>` are recognized only when the `2` begins a new word (i.e. the pending word is empty and the `2` is immediately followed by `>`); a `2` inside a longer word does not form a stderr redirection. `echo a2>f` therefore tokenizes as `a2`, `>`, `f` — matching the execution lexer (lexer.md §3.3.1). A single `&` is not an operator.
+
 ### 4.5 Word Type Determination
 
 After parsing a word, its type is determined by:
 
-1. **Error Check:** If any quote/subshell depth is unbalanced, return TypeError
+1. **Error Check:** If any quote/substitution depth is unbalanced, return TypeError
 2. **Redirection Target:** If `afterRedirection` is true, return TypeRedirectionTarget
-3. **Quoted String:** If entirely enclosed in quotes, return appropriate quote type
-4. **Subshell:** If matches `$(...)` pattern, return TypeSubshell
-5. **Variable:** If starts with `$` and has content, return TypeVariable
+3. **Quoted String:** If the ENTIRE word is wrapped in one matching quote pair, return the appropriate string type. A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a string type and falls through
+4. **Command Substitution:** If the word matches the `$(...)` pattern, return TypeCommandSubst
+5. **Variable:** If the word starts with `$` followed by a letter, underscore, or `{` (§3.10), return TypeVariable
 6. **Command vs Argument:** If `isFirstInCommand`, return TypeCommand; else TypeArgument
 
 ---
@@ -510,7 +509,7 @@ The default theme provides sensible colors for terminal display:
 | TypeSingleQuotedString | `\033[32m` | Green | Single quotes |
 | TypeDoubleQuotedString | `\033[33m` | Yellow | Double quotes (different) |
 | TypeBacktick | `\033[36m` | Cyan | Command substitution |
-| TypeSubshell | `\033[36m` | Cyan | Command substitution |
+| TypeCommandSubst | `\033[36m` | Cyan | Command substitution |
 | TypeVariable | `\033[34m` | Blue | Variables |
 | TypeParenGroup | `\033[35m` | Magenta | Grouping |
 | TypeError | `\033[4;31m` | Underline Red | Errors are very visible |
@@ -639,18 +638,23 @@ The same `Analyze()` function is used for BOTH:
 
 This ensures that any syntax error visible in highlighting is also reported as a diagnostic error, and vice versa.
 
+The promise extends across components: the analyzer and the execution lexer MUST accept exactly the same inputs — an input the analyzer marks valid must tokenize without error, and an input it rejects must fail tokenization. The conformance suite MUST include a lexer/analyzer validity cross-check (for every corpus input, `Tokenize` errors if and only if `Analyze().Valid` is false).
+
 ### 7.2 Error Detection
 
-The analyzer detects these error conditions:
+The analyzer detects these error conditions (canonical strings: diagnostics.md §5):
 
 | Error | Detection | Message |
 |-------|-----------|---------|
-| Unclosed single quote | `singleQuoteDepth % 2 != 0` | "unclosed single quote (odd count)" |
-| Unclosed double quote | `doubleQuoteDepth % 2 != 0` | "unclosed double quote (odd count)" |
-| Unclosed backtick | `backtickDepth % 2 != 0` | "unclosed backtick (odd count)" |
-| Unclosed subshell | `parenDepth > 0` | "unclosed subshell $(...)" |
-| Trailing operator | Last token is `\|`, `&&`, or `\|\|` | "unexpected operator at end" |
-| Missing redirect target | Last token is redirection | "missing redirection target" |
+| Unclosed single quote | `singleQuoteDepth > 0` | `unclosed single quote` |
+| Unclosed double quote | `doubleQuoteDepth > 0` | `unclosed double quote` |
+| Unclosed backtick | `backtickDepth > 0` | `unclosed backtick` |
+| Unclosed command substitution | `parenDepth > 0` | `unclosed command substitution $(...)` |
+| Leading operator | First non-whitespace token is a chain operator | `unexpected operator at start: <op>` |
+| Trailing operator | Last non-whitespace token is `\|`, `&&`, or `\|\|` | `unexpected operator at end` |
+| Missing redirect target | Last non-whitespace token is a redirection | `missing redirection target` |
+
+The leading- and trailing-token checks look at the last/first NON-WHITESPACE token — trailing blanks do not defeat them.
 
 ### 7.3 Error Token Marking
 
@@ -698,7 +702,7 @@ Formats syntax errors for display with:
 ```
 echo "unclosed
      ^^^^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ### 8.3 Caret Line Construction
@@ -713,16 +717,16 @@ func buildCaretLine(start, end int) string
 
 ### 8.4 Multi-Error Handling
 
-Multiple errors are displayed sequentially, separated by newlines:
+Multiple errors are displayed sequentially, with a blank line between blocks (diagnostics.md §7). Both messages use the canonical strings. Note that one unclosed construct usually swallows the rest of the line (a `'` inside open double quotes is literal and cannot produce a second error); two errors require two independently unclosed constructs, e.g. an unclosed substitution containing an unclosed quote:
 
 ```
-echo "a && 'b
-     ^^
+echo $(foo "bar
+     ^^^^^^^^^^
 error: unclosed double quote
 
-echo "a && 'b
-           ^^
-error: unclosed single quote
+echo $(foo "bar
+     ^^^^^^^^^^
+error: unclosed command substitution $(...)
 ```
 
 ### 8.5 Edge Case Handling
@@ -745,59 +749,86 @@ The diagnostics system handles:
 
 ### 9.1 Purpose
 
-Depth tracking enables Foundation Shell's unique approach to nested quotes and command substitutions. Unlike traditional shells that require escape sequences for nesting, Foundation Shell uses depth counting.
+Depth tracking implements Foundation Shell's flagship non-POSIX feature: whitespace-delimited quote NESTING (quoting.md §5.2, §6). The analyzer implements the SAME open/nest/close rule as the execution lexer — quoting.md §5 is the canonical statement — and the §7.1 cross-check keeps the two scanners in lockstep. Unlike traditional shells, where a same-type quote character always closes, Foundation Shell lets it open an interior region; the depth counters track exactly that.
 
 ### 9.2 Depth Counting Rules
 
-For quotes (single, double, backtick):
-- Each opening quote increments depth
-- Each closing quote decrements depth (if depth > 0)
-- Valid input has depth == 0 at end
-- Odd depth count indicates unclosed quote
+For each quote type (single, double, backtick) the analyzer keeps an open-region depth counter (quoting.md §5.1) driven by the rule (quoting.md §5.2):
 
-For subshells:
-- `$(` increments paren depth
-- `)` decrements paren depth (if in subshell context)
-- Positive depth at end indicates unclosed subshell
+- **Depth 0:** an active, unescaped quote character always OPENS its region (depth → 1).
+- **Depth ≥ 1:** a same-type quote character NESTS one level (depth+1) iff the previous rune is whitespace AND a next rune exists that is neither whitespace nor any quote character (`'`, `"`, `` ` ``); otherwise it CLOSES one level (depth−1).
+- Valid input has every counter at 0 at end of input; a positive counter is an unclosed region (canonical strings — diagnostics.md §5).
+- Validity is a DEPTH check, not a parity check: an even quote count can be unclosed (`echo 'a 'b` nests and ends at depth 2), and an odd count always is.
+
+For command substitutions:
+
+- `$(` increments the substitution depth; a `)` with no open quote region in the body closes it (decrements). Explicit delimiters — the neighbor rule is not involved.
+- Backticks follow the quote rule above; positive backtick depth at end of input is an unclosed backtick.
+- Positive `$(` depth at end of input is an unclosed command substitution.
 
 ### 9.3 Context Rules
 
-| Context | Single Quotes | Double Quotes | Backticks | Subshells |
-|---------|---------------|---------------|-----------|-----------|
-| Top-level | Tracked | Tracked | Tracked | Tracked |
-| Inside `'...'` | Tracked (nested) | NOT tracked | NOT tracked | NOT tracked |
-| Inside `"..."` | NOT tracked | Tracked (nested) | Tracked | Tracked |
-| Inside `` `...` `` | Tracked | Tracked | Tracked (nested) | Tracked |
-| Inside `$(...)` | Tracked | Tracked | Tracked | Tracked (nested) |
+Which characters are ACTIVE (tracked) in which context — matching quoting.md §5.3:
+
+| Context | Single Quotes | Double Quotes | Backticks | Command Subst `$(...)` |
+|---------|---------------|---------------|-----------|------------------------|
+| Top-level | Rule (§9.2) | Rule (§9.2) | Rule (§9.2) | Tracked |
+| Inside `'...'` | Same-type rule (nest/close) | Literal | Literal | Literal |
+| Inside `"..."` | Literal | Same-type rule (nest/close) | Rule (opens substitution) | Tracked |
+| Inside `` `...` `` body | Literal | Tracked (body state; never gates the body's closing) | Same-type rule (nest/close) | Tracked (opens nested context) |
+| Inside `$(...)` body | Tracked (body state; gates `)`) | Tracked (body state; gates `)`) | Rule (opens nested context) | Tracked (nested) |
+
+Substitution bodies begin a fresh quote context: enclosing depths are saved and restored at the body boundary, body characters are preserved verbatim, and the body is re-parsed recursively at execution (quoting.md §5.3; lexer.md §7.1).
 
 ### 9.4 AnalyzedToken.Depth Field
 
-Each token records its maximum nesting depth:
+`Depth` is defined PRECISELY as: **the maximum nesting level reached within the token, across quote regions and command substitutions** — the high-water mark of the combined total depth (quoting.md §5.4) over the token's span.
 
 ```go
-maxDepth := max(singleQuoteDepth, doubleQuoteDepth, backtickDepth, parenDepth)
+// Maintain a running total nesting level:
+//   +1 on every region open or nest (quote OPEN/NEST, `$(`, backtick open/nest)
+//   -1 on every close
+// and record the per-token high-water mark:
+tokenDepth = max(tokenDepth, currentTotalDepth)
 ```
 
-This enables future depth-based visualization.
+| Token | Depth |
+|-------|-------|
+| `foo` (unquoted) | 0 |
+| `'a'` | 1 |
+| `'a 'b' c'` | 2 |
+| `"x $(date)"` | 2 |
+| `$(echo $(pwd))` | 2 |
+
+It is a per-token maximum, NOT the final counter value. This enables future depth-based visualization (§11.1).
 
 ### 9.5 Examples
 
 **Nested Single Quotes:**
 ```sh
-echo 'it's 'cool''
-      ^1  ^2   ^1^0    # Depth transitions
+echo 'it 'really' works'
+     ^1  ^2      ^1     ^0    # OPEN, NEST (space before, r after), CLOSE, CLOSE
+# One token; argument: it 'really' works
 ```
 
 **Nested Double Quotes:**
 ```sh
 echo "outer "inner" outer"
-      ^1    ^2    ^1    ^0    # Depth transitions
+     ^1     ^2     ^1     ^0    # OPEN, NEST, CLOSE, CLOSE
+# One token; argument: outer "inner" outer
 ```
 
-**Nested Subshells:**
+**Nested Command Substitutions:**
 ```sh
 echo $(echo $(pwd))
-      ^1    ^2   ^1^0    # Depth transitions
+     ^1     ^2   ^1^0    # explicit delimiters
+```
+
+**Nested Backticks (recursive execution — quoting.md §6.3):**
+```sh
+echo `outer `inner` end`
+     ^1     ^2     ^1   ^0
+# `inner` runs inside the outer substitution's body when it is re-parsed
 ```
 
 ---
@@ -850,10 +881,12 @@ cd $HOME/projects    # "$HOME/projects" is TypeVariable (single token)
 
 ### 10.6 Adjacent Quotes
 
-Adjacent quoted strings are separate tokens:
+Adjacent quoted segments form ONE word token (a quote character is not a word boundary — §4.3):
 ```sh
-echo 'a'"b"    # Two tokens: "'a'" and "\"b\""
+echo 'a'"b"    # One token: "'a'\"b\"" - TypeArgument
 ```
+
+The whole-word type rules apply (§4.5): `'a'"b"` mixes quote styles, so it is TypeArgument, not a string type. The execution lexer concatenates the same word into the single token `ab` (lexer.md §4.4).
 
 ### 10.7 Redirection Without Space
 
@@ -861,6 +894,8 @@ Redirection operators can be adjacent to arguments:
 ```sh
 echo>file      # "echo" (Command), ">" (Redirection), "file" (RedirectionTarget)
 ```
+
+The execution lexer tokenizes this identically (lexer.md §3.3) — `echo>file` is valid end-to-end.
 
 ### 10.8 Multiple Redirections
 
@@ -876,10 +911,10 @@ Tokens: `cmd`, `<`, `in`, `>`, `out`, `2>>`, `err`
 
 ### 11.1 Depth Tracking Visualization
 
-The `Depth` field in `AnalyzedToken` is designed for future visual features:
+The `Depth` field in `AnalyzedToken` — the per-token maximum nesting level (§9.4) — is designed for future visual features:
 
-- **Nested Highlighting:** Different shades or styles based on depth
-- **Rainbow Brackets:** Different colors for each nesting level
+- **Nested Highlighting:** Different shades or styles based on nesting level
+- **Rainbow Quotes/Brackets:** Different colors for each nesting level (nested quote pairs, `$(...)` levels)
 - **Depth Indicators:** Visual markers showing nesting level
 
 ### 11.2 Potential Token Type Extensions
@@ -962,21 +997,22 @@ The implementation includes comprehensive tests covering:
 - Token position accuracy
 - All operator types
 - Single and double quotes
-- Nested quotes (depth tracking)
-- Unclosed quote errors
+- Nested quotes (whitespace-delimited nesting, quoting.md §5.2/§6 — incl. multi-level)
+- Unclosed quote errors (incl. even-count unclosed inputs like `'a 'b`)
 - Variables (simple and braced)
-- Subshells
+- Command substitutions (`$(...)`)
 - Backticks
-- Nested backticks
+- Nested backticks (recursive execution, quoting.md §6.3)
 - Trailing operator errors
 - Missing redirection target errors
 - Escaped characters
 - Error position accuracy
-- Depth tracking values
+- Depth values (§9.4 per-token maximum: `foo` 0, `'a'` 1, `'a 'b' c'` 2)
 - Empty input
 - Whitespace-only input
 - Command after pipe
 - Command after semicolon
+- Lexer/analyzer validity cross-check (§7.1)
 
 ### Highlighter Tests (`highlighter_test.go`)
 - Basic command highlighting
@@ -984,7 +1020,7 @@ The implementation includes comprehensive tests covering:
 - Redirection highlighting
 - Quote highlighting (single/double)
 - Variable highlighting
-- Subshell highlighting
+- Command substitution highlighting
 - Backtick highlighting
 - Error highlighting (unclosed constructs)
 - Input preservation (stripped ANSI equals original)

@@ -2,11 +2,75 @@
 
 ## Purpose
 
-This is the authoritative specification for Foundation Shell. The spec should be:
+This is the authoritative specification for Foundation Shell (the implementation lives in `wow-look-at-my/foundation-shell`). The spec should be:
 - Minimal duplication
 - Clear and obvious
 - Unsurprising behavior
 - Unambiguous
+
+The **canonical authority map** — which file owns which topic — lives in [README.md](README.md). When two files overlap, edit the owning file and cross-reference it from the other.
+
+## File Structure
+
+| Path | Purpose |
+|------|---------|
+| `README.md` | Repo overview, canonical authority map, reading order, architecture notes |
+| `src/*.md` | The nine spec source files (lexer, parser, quoting, expansion, operators, redirection, execution, highlighting, diagnostics) |
+| `src/_partials/*.md` | Shared content included by multiple spec files (no frontmatter) |
+| `src/README.md.tmpl` | Template for the generated `dist/README.md` (`{{READING_ORDER}}`, `{{FILE_TABLE}}` placeholders) |
+| `generator/` | Go tool that renders `src/` into `dist/` |
+| `justfile` | Build recipes (see below) |
+| `index.html` | Pages root redirect to `llms.txt` |
+| `.github/workflows/` | `validate.yml` builds every push and deploys Pages from master; Claude review workflows |
+| `dist/` | Generated output (gitignored — never edit or commit it) |
+
+The executable conformance suite (BATS) lives in the **implementation repo** at `spec/tests/`, where CI runs it against the built shell. Do not add a copy here — it would drift.
+
+## Source File Conventions
+
+### Frontmatter
+
+Every `src/*.md` file (not partials) starts with YAML frontmatter:
+
+```yaml
+---
+title: Lexer Specification
+description: Tokenization rules, operator recognition, and quote state tracking.
+recommend_after: parser.md
+---
+```
+
+- `title` — required; used in llms.txt and the generated README.
+- `description` — required; 20–250 characters; used in llms.txt and the file table.
+- `recommend_after` — optional; names the file that precedes this one in reading order. The nine files form a **single linear chain** (lexer → parser → quoting → expansion → operators → redirection → execution → highlighting → diagnostics); when adding a file, splice it into the chain (point it at its predecessor and repoint the old successor at it).
+
+### Includes
+
+Shared content lives in `src/_partials/` and is pulled in with:
+
+```markdown
+[include:_partials/escape-sequences.md](_partials/escape-sequences.md)
+```
+
+- The syntax is `[include:REL/PATH](REL/PATH)` — the label path (after `include:`) and the link target in parentheses MUST be identical (the generator warns on mismatch and resolves the label). The path is relative to the including file's directory. The duplicated path keeps the directive a working link when reading the raw source on GitHub.
+- Includes expand recursively; partials may include other partials.
+
+### Generator behavior (what `just generate` does)
+
+- Expands includes into `dist/*.md`. A **missing include file is a fatal error** (build fails; nothing is written). Include **cycles are detected** and reported. All sources are validated before any output is written.
+- Include directives inside fenced code blocks (``` or ~~~) are left verbatim — that is how the spec can document the include syntax itself.
+- **Frontmatter is stripped** from the published pages; it only feeds llms.txt, the README, and ordering.
+- Emits `llms.txt` in llmstxt.org format (H1 title, blockquote summary, `## Docs` list of absolute-URL links in reading order) and renders `dist/README.md` from `src/README.md.tmpl`.
+
+## Build
+
+```bash
+just generate   # render src/ into dist/ (spec pages, llms.txt, README.md)
+just clean      # remove dist/
+just dev        # generate + list the output
+```
+
+Always run `just generate` after editing `src/` and confirm it exits cleanly — CI (validate.yml) runs the same generation on every push and deploys `dist/` to GitHub Pages from master.
 
 ## Workflow for Spec Review/Iteration
 
@@ -18,19 +82,10 @@ Read the spec files and identify issues:
 - Missing information
 - Inconsistent formatting
 
-### 2. Track Issues
-Create/update `ISSUES.md` to track findings:
-```markdown
-## Issue N: Brief Title
-**Status:** PENDING | RESOLVED
-**Severity:** High | Medium | Low
+### 2. Track Issues on GitHub
+Findings are tracked as **GitHub issues** on this repository (there is no ISSUES.md file). Before filing, search existing issues to avoid duplicates. Include severity (High/Medium/Low), the affected files with line references, and a suggested fix.
 
-Description of the issue.
-
-**Resolution:** (once resolved)
-```
-
-### 3. One Question at a Time
+### 3. One Question at a Time (interactive sessions)
 Use `AskUserQuestion` to resolve each issue individually. Provide clear options:
 - Always include a recommended option if one is clearly better
 - Include an option for the user to specify their own approach
@@ -39,29 +94,13 @@ Use `AskUserQuestion` to resolve each issue individually. Provide clear options:
 ### 4. One Commit per Issue
 After resolving each issue:
 1. Make the necessary edits
-2. Commit with a clear message explaining what was fixed
-3. Update ISSUES.md to mark as RESOLVED
+2. Run `just generate` to confirm the build is green
+3. Commit with a clear message explaining what was fixed; reference the issue (`Fixes #N`) so it closes on merge
 4. Move to the next issue
 
 ### 5. AI/LLM Optimization
 When making structural decisions, prefer approaches that help AI/LLMs navigate:
-- **Canonical locations** - Define which file is authoritative for each topic
+- **Canonical locations** - Define which file is authoritative for each topic (the map lives in README.md)
 - **Cross-references** - Use "See X.md §N" instead of duplicating content
 - **Focused files** - Smaller files fit better in context windows
 - **Single source of truth** - Prevents inconsistencies that confuse AI readers
-
-## File Structure
-
-| File | Purpose |
-|------|---------|
-| `README.md` | Overview and canonical source mapping |
-| `lexer.md` | Tokenization rules |
-| `parser.md` | Parsing and AST |
-| `expansion.md` | Variable/command substitution |
-| `execution.md` | Command execution semantics |
-| `operators.md` | Control flow operators |
-| `quoting.md` | Quote handling and depth tracking |
-| `redirection.md` | I/O redirection |
-| `diagnostics.md` | Error message formatting |
-| `highlighting.md` | Syntax highlighting |
-| `ISSUES.md` | Issue tracker for spec review |

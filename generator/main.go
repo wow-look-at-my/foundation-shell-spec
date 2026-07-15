@@ -1,7 +1,15 @@
+// Command generator renders the Foundation Shell specification sources
+// (src/*.md) into publishable output (dist/):
+//
+//   - expands [include:PATH](PATH) directives (outside fenced code blocks)
+//   - strips YAML frontmatter from the published pages
+//   - emits llms.txt (llmstxt.org format) and README.md in reading order
+//
+// All sources are read and validated BEFORE anything is written, so a failed
+// run never leaves partial output behind.
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +18,21 @@ import (
 	"strings"
 )
 
-// includePattern matches [include:path](path) style links
-var includePattern = regexp.MustCompile(`\[include:([^\]]+)\]\([^)]+\)`)
+// includePattern matches [include:LABEL](TARGET) directives. The LABEL is the
+// path that is resolved (relative to the including file's directory); LABEL
+// and TARGET must be identical so that the GitHub-rendered source link and the
+// generated output cannot diverge.
+var includePattern = regexp.MustCompile(`\[include:([^\]]+)\]\(([^)]+)\)`)
+
+// fenceOpenPattern matches the opening of a fenced code block: up to three
+// spaces of indentation followed by at least three backticks or tildes.
+var fenceOpenPattern = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})")
+
+const (
+	baseURL     = "https://wow-look-at-my.github.io/foundation-shell-spec/"
+	siteTitle   = "Foundation Shell Specification"
+	siteSummary = "The authoritative specification for Foundation Shell, a from-scratch shell with depth-tracked quote nesting, pipelines, redirection, command substitution, and built-in syntax highlighting."
+)
 
 func main() {
 	if len(os.Args) < 3 {
@@ -28,12 +49,15 @@ func main() {
 	}
 }
 
-func run(srcDir, outDir string) error {
-	// Create output directory
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return fmt.Errorf("creating output directory: %w", err)
-	}
+// specFile is a fully read, validated, and include-expanded source file,
+// ready to be written out.
+type specFile struct {
+	relPath string // path relative to srcDir (and inside outDir)
+	meta    *fileMeta
+	body    string // frontmatter stripped, includes expanded
+}
 
+func run(srcDir, outDir string) error {
 	// Find all .md files
 	var mdFiles []string
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -53,7 +77,10 @@ func run(srcDir, outDir string) error {
 		return fmt.Errorf("walking source directory: %w", err)
 	}
 
-	// Parse frontmatter and process each file
+	// Phase 1: read, validate, and expand everything in memory. No output is
+	// written until every file has passed, so a failure cannot leave a
+	// partially generated output directory behind.
+	var files []*specFile
 	var metas []*fileMeta
 	for _, srcPath := range mdFiles {
 		relPath, err := filepath.Rel(srcDir, srcPath)
@@ -61,18 +88,28 @@ func run(srcDir, outDir string) error {
 			return fmt.Errorf("getting relative path for %s: %w", srcPath, err)
 		}
 
-		outPath := filepath.Join(outDir, relPath)
-
-		if err := processFile(srcDir, srcPath, outPath); err != nil {
-			return fmt.Errorf("processing %s: %w", srcPath, err)
-		}
-
-		meta, err := parseFrontmatter(srcPath)
+		content, err := os.ReadFile(srcPath)
 		if err != nil {
-			return fmt.Errorf("parsing frontmatter for %s: %w", srcPath, err)
+			return fmt.Errorf("reading %s: %w", srcPath, err)
 		}
+
+		fmLines, body, err := splitFrontmatter(string(content))
+		if err != nil {
+			return fmt.Errorf("%s: %w", relPath, err)
+		}
+
+		meta, err := parseFrontmatter(filepath.Base(srcPath), fmLines)
+		if err != nil {
+			return err
+		}
+
+		expanded, err := processIncludes(filepath.Dir(srcPath), body, []string{srcPath})
+		if err != nil {
+			return fmt.Errorf("processing %s: %w", relPath, err)
+		}
+
+		files = append(files, &specFile{relPath: relPath, meta: meta, body: expanded})
 		metas = append(metas, meta)
-		fmt.Printf("Processed: %s\n", relPath)
 	}
 
 	// Sort by recommend_after
@@ -81,69 +118,164 @@ func run(srcDir, outDir string) error {
 		return err
 	}
 
+	// Phase 2: everything validated — write the output.
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+
+	for _, f := range files {
+		outPath := filepath.Join(outDir, f.relPath)
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return fmt.Errorf("creating output directory for %s: %w", f.relPath, err)
+		}
+		if err := os.WriteFile(outPath, []byte(f.body), 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", outPath, err)
+		}
+		fmt.Printf("Processed: %s\n", f.relPath)
+	}
+
 	// Generate llms.txt
 	if err := generateLLMsTxt(outDir, sortedMetas); err != nil {
 		return fmt.Errorf("generating llms.txt: %w", err)
 	}
 
 	// Generate README.md from template if it exists
+	readmeGenerated := false
 	readmeTmpl := filepath.Join(srcDir, "README.md.tmpl")
 	if _, err := os.Stat(readmeTmpl); err == nil {
 		if err := generateREADME(srcDir, outDir, sortedMetas); err != nil {
 			return fmt.Errorf("generating README.md: %w", err)
 		}
+		readmeGenerated = true
 	}
 
-	fmt.Printf("\nGenerated %d files + llms.txt + README.md\n", len(sortedMetas))
+	summary := fmt.Sprintf("\nGenerated %d files + llms.txt", len(sortedMetas))
+	if readmeGenerated {
+		summary += " + README.md"
+	}
+	fmt.Println(summary)
 	return nil
 }
 
-func processFile(srcDir, srcPath, outPath string) error {
-	content, err := os.ReadFile(srcPath)
-	if err != nil {
-		return fmt.Errorf("reading file: %w", err)
+// splitFrontmatter separates the leading YAML frontmatter block from the body.
+// The file must start with a `---` line and contain a closing `---` line;
+// the returned body has the frontmatter (and its delimiters) removed.
+func splitFrontmatter(content string) (fmLines []string, body string, err error) {
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimRight(lines[0], "\r") != "---" {
+		return nil, "", fmt.Errorf("missing frontmatter (must start with ---)")
 	}
-
-	// Process includes
-	processed := processIncludes(srcDir, filepath.Dir(srcPath), string(content))
-
-	// Create output directory if needed
-	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		return fmt.Errorf("creating output directory: %w", err)
+	closing := -1
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimRight(lines[i], "\r") == "---" {
+			closing = i
+			break
+		}
 	}
-
-	if err := os.WriteFile(outPath, []byte(processed), 0644); err != nil {
-		return fmt.Errorf("writing file: %w", err)
+	if closing == -1 {
+		return nil, "", fmt.Errorf("unterminated frontmatter (missing closing ---)")
 	}
-
-	return nil
+	body = strings.Join(lines[closing+1:], "\n")
+	return lines[1:closing], strings.TrimLeft(body, "\n"), nil
 }
 
-func processIncludes(srcDir, currentDir, content string) string {
-	return includePattern.ReplaceAllStringFunc(content, func(match string) string {
-		// Extract the path from the match
-		submatches := includePattern.FindStringSubmatch(match)
-		if len(submatches) < 2 {
+// processIncludes expands [include:PATH](PATH) directives in content. Include
+// directives inside fenced code blocks (``` or ~~~) are left verbatim so the
+// spec can document the include syntax itself. stack carries the chain of
+// files currently being expanded, for cycle detection; its first element is
+// the file content came from.
+func processIncludes(currentDir, content string, stack []string) (string, error) {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+
+	inFence := false
+	var fenceChar byte
+	var fenceLen int
+
+	for _, line := range lines {
+		if inFence {
+			out = append(out, line)
+			if isFenceClose(line, fenceChar, fenceLen) {
+				inFence = false
+			}
+			continue
+		}
+		if m := fenceOpenPattern.FindStringSubmatch(line); m != nil {
+			inFence = true
+			fenceChar = m[1][0]
+			fenceLen = len(m[1])
+			out = append(out, line)
+			continue
+		}
+
+		expanded, err := expandIncludesInLine(currentDir, line, stack)
+		if err != nil {
+			return "", err
+		}
+		out = append(out, expanded)
+	}
+
+	return strings.Join(out, "\n"), nil
+}
+
+// isFenceClose reports whether line closes a fence opened by fenceLen
+// repetitions of fenceChar: up to three spaces of indentation, at least
+// fenceLen fence characters, and nothing else but whitespace.
+func isFenceClose(line string, fenceChar byte, fenceLen int) bool {
+	s := strings.TrimLeft(line, " ")
+	if len(line)-len(s) > 3 {
+		return false
+	}
+	n := 0
+	for n < len(s) && s[n] == fenceChar {
+		n++
+	}
+	if n < fenceLen {
+		return false
+	}
+	return strings.TrimSpace(s[n:]) == ""
+}
+
+// expandIncludesInLine replaces every include directive in a single line with
+// the (recursively expanded) content of the referenced file. A missing file
+// or an include cycle is a fatal error; a label/target mismatch is a warning
+// (the label path is authoritative).
+func expandIncludesInLine(currentDir, line string, stack []string) (string, error) {
+	var expandErr error
+	result := includePattern.ReplaceAllStringFunc(line, func(match string) string {
+		if expandErr != nil {
+			return match
+		}
+		sub := includePattern.FindStringSubmatch(match)
+		label, target := sub[1], sub[2]
+		if label != target {
+			fmt.Fprintf(os.Stderr, "Warning: %s: include label %q does not match link target %q (they must match; the label path is used)\n",
+				stack[len(stack)-1], label, target)
+		}
+
+		fullPath := filepath.Clean(filepath.Join(currentDir, label))
+
+		for i, s := range stack {
+			if s == fullPath {
+				expandErr = fmt.Errorf("include cycle: %s", strings.Join(append(stack[i:], fullPath), " -> "))
+				return match
+			}
+		}
+
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			expandErr = fmt.Errorf("include %s (from %s): %w", label, stack[len(stack)-1], err)
 			return match
 		}
 
-		includePath := submatches[1]
-
-		// Resolve the include path relative to current file's directory
-		fullPath := filepath.Join(currentDir, includePath)
-
-		// Read the included file
-		includeContent, err := os.ReadFile(fullPath)
+		processed, err := processIncludes(filepath.Dir(fullPath), string(data), append(stack, fullPath))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not include %s: %v\n", includePath, err)
-			return match // Keep original if include fails
+			expandErr = err
+			return match
 		}
-
-		// Recursively process includes in the included content
-		processed := processIncludes(srcDir, filepath.Dir(fullPath), string(includeContent))
-
 		return processed
 	})
+	return result, expandErr
 }
 
 // fileMeta holds frontmatter metadata for a file
@@ -154,32 +286,12 @@ type fileMeta struct {
 	recommendAfter string // filename this should come after
 }
 
-// parseFrontmatter extracts title, description, and recommend_after from file
-func parseFrontmatter(path string) (*fileMeta, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	filename := filepath.Base(path)
+// parseFrontmatter extracts title, description, and recommend_after from the
+// frontmatter lines of a file and validates the required fields.
+func parseFrontmatter(filename string, fmLines []string) (*fileMeta, error) {
 	meta := &fileMeta{file: filename}
-	scanner := bufio.NewScanner(f)
 
-	// Look for YAML frontmatter
-	if !scanner.Scan() {
-		return nil, fmt.Errorf("%s: missing frontmatter", filename)
-	}
-	firstLine := scanner.Text()
-	if firstLine != "---" {
-		return nil, fmt.Errorf("%s: missing frontmatter (must start with ---)", filename)
-	}
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "---" {
-			break
-		}
+	for _, line := range fmLines {
 		if strings.HasPrefix(line, "title:") {
 			meta.title = strings.TrimSpace(strings.TrimPrefix(line, "title:"))
 		}
@@ -225,6 +337,9 @@ func topoSort(metas []*fileMeta) ([]*fileMeta, error) {
 			if _, exists := metaMap[m.recommendAfter]; exists {
 				afterMap[m.recommendAfter] = append(afterMap[m.recommendAfter], m.file)
 				inDegree[m.file]++
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: %s: recommend_after %q does not match any generated file (edge ignored)\n",
+					m.file, m.recommendAfter)
 			}
 		}
 	}
@@ -263,17 +378,18 @@ func topoSort(metas []*fileMeta) ([]*fileMeta, error) {
 	return result, nil
 }
 
-const baseURL = "https://wow-look-at-my-code.github.io/foundation-shell-spec/"
-
+// generateLLMsTxt writes llms.txt in the llmstxt.org format: an H1 title, a
+// one-line blockquote summary, and a Docs section linking every page (with
+// absolute URLs) in recommended reading order.
 func generateLLMsTxt(outDir string, metas []*fileMeta) error {
 	var builder strings.Builder
 
-	builder.WriteString("Foundation Shell Specification\n\n")
-	builder.WriteString("Base URL: " + baseURL + "\n\n")
-	builder.WriteString("Documentation (recommended reading order):\n")
+	builder.WriteString("# " + siteTitle + "\n\n")
+	builder.WriteString("> " + siteSummary + "\n\n")
+	builder.WriteString("## Docs\n\n")
 
-	for i, meta := range metas {
-		builder.WriteString(fmt.Sprintf("  %d. %s - %s\n", i+1, meta.file, meta.description))
+	for _, meta := range metas {
+		builder.WriteString(fmt.Sprintf("- [%s](%s%s): %s\n", meta.title, baseURL, meta.file, meta.description))
 	}
 
 	llmsPath := filepath.Join(outDir, "llms.txt")

@@ -1,12 +1,14 @@
 ---
 title: Operators Specification
 description: Control flow operators (pipe, AND, OR, semicolon), precedence rules, and short-circuit evaluation.
-recommend_after: parser.md
+recommend_after: expansion.md
 ---
 
 # Operators Specification
 
-This document provides the exhaustive specification for Foundation Shell operators. This specification is the authoritative source of truth for operator behavior.
+> **Canonical for:** chain operator semantics (`|`, `&&`, `||`, `;`), precedence, and operator-related error cases. The authority map lives in the README.
+
+This document provides the exhaustive specification for Foundation Shell's chain operators. (Operator *tokenization* — maximal munch, no whitespace required, quoting/escaping immunity — is specified in lexer.md §3.3.)
 
 ## Table of Contents
 
@@ -47,7 +49,14 @@ command_1  operator_1  command_2  operator_2  ...  command_N
 
 - An exit code of `0` indicates **success**
 - Any non-zero exit code indicates **failure**
-- The exit code range is 0-255 (standard Unix convention)
+- The exit code range is 0-255 (standard Unix convention; normative table in execution.md §Exit Codes)
+
+A command that fails to START — command not found (127), found but not executable (126), redirection target that fails to open (1) — yields its failure status to operator evaluation like any other non-zero exit. It NEVER aborts the chain (execution.md §Runtime Failures Never Abort the Chain):
+
+```bash
+nosuchcmd || echo fallback   # prints fallback; exit status 0
+nosuchcmd ; echo next        # prints next
+```
 
 ---
 
@@ -323,19 +332,20 @@ echo "a" ; echo "b" ; echo "c"
 # All three execute in order
 ```
 
-### Distinction from Newlines
+### Newlines Are Equivalent Separators
 
-In Foundation Shell, both `;` and newlines act as command separators, but:
-
-- Newlines: Each line is parsed and executed independently
-- Semicolon: Multiple commands on the same line, parsed together
+An unquoted newline at depth 0 is lexed as a soft `;` (lexer.md §3.4): within one parsed input, `echo a ; echo b` and `echo a` ⏎ `echo b` build the SAME chain.
 
 ```bash
-# Equivalent behavior:
+# Equivalent behavior (one parsed input):
 echo a ; echo b
 echo a
 echo b
 ```
+
+- Interactive mode reads one LINE at a time, so each line is a separate parse and newlines never reach the lexer
+- Non-interactive input — scripts, piped stdin, `fsh-exec` strings — is parsed as ONE input in which newlines separate commands (execution.md §Non-Interactive Mode)
+- After a chain operator a newline is a CONTINUATION, not a separator: `cmd1 &&` ⏎ `cmd2` behaves exactly like `cmd1 && cmd2` (lexer.md §3.4)
 
 ### Use Cases
 
@@ -552,19 +562,25 @@ cmd ;
 
 ### Missing Operands
 
-Operators must have valid commands on both sides.
+A chain operator with a missing operand is reported by the position rules above — there is no separate "missing operand" error:
 
 ```bash
-# ERROR: empty command (left side)
-| cmd
+| cmd     # ERROR: unexpected operator at start: |
+cmd |     # ERROR: unexpected operator at end: |
+```
 
-# ERROR: empty command (right side)
-cmd |
+The `empty command` error is distinct: it applies when a command consists of redirections only, with no words at all:
+
+```bash
+# ERROR: empty command (redirection-only command)
+> file
 ```
 
 **Error Message:** `empty command`
 
 **Error Code:** Parse error, exit code 1
+
+(Canonical error strings: diagnostics.md §5.2.)
 
 ### Consecutive Operators
 
@@ -600,10 +616,10 @@ An empty command line or whitespace-only input is an error (for parse operations
 
 | Error Condition         | Example          | Error Message                    |
 |-------------------------|------------------|----------------------------------|
-| Operator at start       | `\| cmd`         | unexpected operator at start     |
-| Operator at end         | `cmd &&`         | unexpected operator at end       |
-| Empty command           | `cmd \| \| other`| empty command                    |
-| Consecutive operators   | `cmd && \|\| x`  | consecutive operators            |
+| Operator at start       | `\| cmd`         | unexpected operator at start: \| |
+| Operator at end         | `cmd &&`         | unexpected operator at end: &&   |
+| Empty command           | `> file`         | empty command                    |
+| Consecutive operators   | `cmd \| \| x`    | consecutive operators: \| followed by \| |
 | Empty input             | (empty string)   | empty input                      |
 
 ---
@@ -634,47 +650,58 @@ const (
 
 ### Execution Algorithm
 
+The decision whether a segment runs is made BEFORE executing it, from the operator that PRECEDES it and the current propagated status. A skipped segment preserves `lastStatus` unchanged, so the operator after a skipped segment is evaluated against the ORIGINAL status — `false && a && b` runs nothing and returns 1; `true || a || b` runs nothing and returns 0.
+
 ```
 function ExecuteChain(chain):
+    lastStatus = 0
     i = 0
     while i < len(chain.Commands):
-        // Find extent of current pipeline
+        // Find extent of the current pipeline segment
         pipelineEnd = i
         while pipelineEnd < len(chain.Operators) and chain.Operators[pipelineEnd] == Pipe:
             pipelineEnd++
 
-        // Execute pipeline (commands[i] through commands[pipelineEnd])
-        pipelineCommands = chain.Commands[i : pipelineEnd+1]
-        exitCode = ExecutePipeline(pipelineCommands)
+        // The operator PRECEDING this segment decides whether it runs,
+        // evaluated against the CURRENT lastStatus
+        run = true
+        if i > 0:
+            switch chain.Operators[i-1]:
+                case And:       run = (lastStatus == 0)
+                case Or:        run = (lastStatus != 0)
+                case Semicolon: run = true
 
-        // Move past this pipeline
+        if run:
+            pipelineCommands = chain.Commands[i : pipelineEnd+1]
+            lastStatus = ExecutePipeline(pipelineCommands)
+        // else: segment SKIPPED - lastStatus is PRESERVED, and the next
+        // iteration evaluates the following operator against it
+
+        // Move past this pipeline segment
         i = pipelineEnd + 1
 
-        // Handle logical operator after pipeline
-        if pipelineEnd < len(chain.Operators):
-            op = chain.Operators[pipelineEnd]
-            switch op:
-                case And:
-                    if exitCode != 0:
-                        skip next pipeline
-                case Or:
-                    if exitCode == 0:
-                        skip next pipeline
-                case Semicolon:
-                    continue unconditionally
+    return lastStatus
+```
 
-    return exitCode
+Worked example — `false && echo a && echo b`:
+
+```
+Segment 1: false            runs (first segment)      -> lastStatus = 1
+Segment 2: echo a           preceded by && , status 1 -> SKIPPED, lastStatus stays 1
+Segment 3: echo b           preceded by && , status 1 -> SKIPPED, lastStatus stays 1
+Result: no output, exit status 1
 ```
 
 ### Pipeline Execution
 
-Pipelines execute all commands concurrently:
+Pipelines execute all commands concurrently (mechanics canonical in execution.md §Pipeline Execution):
 
 1. Create pipes between adjacent commands
 2. Launch all commands in goroutines
 3. Connect stdout[i] to stdin[i+1] via pipes
-4. Wait for all commands to complete
-5. Return exit code of rightmost command
+4. When a command finishes, close BOTH of its pipe ends — an early-exiting consumer terminates its producer (`yes | head -1` must not hang)
+5. Wait for all commands to complete
+6. Return exit code of rightmost command
 
 ### Thread Safety
 
@@ -692,12 +719,12 @@ Foundation Shell operators follow POSIX shell semantics with these characteristi
 2. **Short-circuit evaluation**: AND/OR behave per POSIX specification
 3. **Left-to-right evaluation**: Matches POSIX evaluation order
 4. **Precedence**: Pipes bind tighter than logical operators (POSIX compliant)
+5. **Trailing semicolon**: allowed and consumed, like bash and POSIX shells (parser.md)
 
 ### Differences from Bash
 
 1. **No `pipefail`**: Foundation Shell does not support `set -o pipefail`
 2. **No `PIPESTATUS`**: No array of individual pipeline exit codes
-3. **Trailing semicolon**: Foundation Shell allows trailing `;` (like bash)
 
 ### Future Considerations
 
