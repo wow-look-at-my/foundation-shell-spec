@@ -154,7 +154,7 @@ Tokens: ["echo", "$(echo hello world)"]
 
 A word boundary occurs when:
 
-1. Unquoted whitespace outside any command substitution is encountered
+1. Whitespace at total quote/substitution depth 0 (quoting.md §5.4) is encountered — whitespace inside any open quote region (including nested levels) or substitution body is content
 2. An operator is recognized (§3.3)
 3. End of input is reached
 
@@ -234,7 +234,7 @@ Single quotes create **strong quoting** - everything inside is preserved literal
 | No escape processing | Backslashes are literal: `'a\b'` -> `a\b` |
 | No variable expansion | Dollar signs are literal: `'$VAR'` -> `$VAR` |
 | Preserves whitespace | Spaces don't split: `'a b'` -> single token `a b` |
-| Cannot contain single quote | No way to include `'` inside single quotes |
+| Same-type nesting | A `'` inside the region nests (whitespace-delimited) or closes, per the quote rule (quoting.md §5.2); nested quotes stay literally in the token. Attached apostrophes close — use `'\''` (quoting.md §2.3) |
 | Sets WasSingleQuoted flag | Token marked for expansion suppression (WasQuoted is also set) |
 
 #### 4.1.2 Single Quote Examples
@@ -251,6 +251,12 @@ Tokens: [{Content: "echo"},
 Input: echo 'back\\slash'
 Tokens: [{Content: "echo"},
          {Content: "back\\slash", WasSingleQuoted: true, WasQuoted: true}]
+
+Input: echo 'outer 'inner' end'
+Tokens: [{Content: "echo"},
+         {Content: "outer 'inner' end", WasSingleQuoted: true, WasQuoted: true}]
+// The whitespace-delimited interior pair NESTS and stays literal;
+// only the outermost pair is stripped (quoting.md §6.1)
 ```
 
 ### 4.2 Double Quotes (`"..."`)
@@ -265,6 +271,7 @@ Double quotes create **weak quoting** - whitespace is preserved but escapes are 
 | Variable expansion allowed | `$VAR` and `${VAR}` will be expanded (by expander) |
 | Preserves whitespace | Spaces don't split tokens |
 | Can contain escaped quotes | `\"` produces literal `"` |
+| Same-type nesting | A `"` inside the region nests or closes per the quote rule (quoting.md §5.2, §6.2); nested quotes stay literally in the token |
 | Sets WasQuoted flag | Tilde expansion suppressed; other expansions still eligible |
 | Does NOT set WasSingleQuoted | Token eligible for variable/command expansion |
 
@@ -286,7 +293,7 @@ Tokens: [{Content: "echo"},
 
 ### 4.3 Backticks (`` `...` ``)
 
-Backticks delimit command substitution. The lexer tracks backtick state (§7): an unescaped backtick outside single quotes opens a substitution and the next one closes it. Between the two, the body — including whitespace and quote characters — is preserved verbatim in the token.
+Backticks delimit command substitution. The lexer tracks backtick depth (§7) with the open/nest/close quote rule (quoting.md §5.2): an unescaped backtick outside single quotes opens a substitution at depth 0; inside one, it nests (whitespace-delimited) or closes. Between the outermost pair, the body — including whitespace, quote characters, and nested backticks — is preserved verbatim in the token.
 
 #### 4.3.1 Backtick Behavior in Lexer
 
@@ -443,18 +450,18 @@ The lexer recognizes command-substitution **delimiters** so that an entire subst
 ### 7.1 Substitution Scanning Rules
 
 1. An unescaped `$(` outside single quotes opens a command substitution and increments the parenthesis depth. `$(...)` may nest: each `$(` inside an open substitution increments the depth again.
-2. An unescaped backtick outside single quotes toggles backtick state: it opens a substitution if none is open, and closes the open one otherwise. (For backtick nesting semantics see quoting.md §6.3; escaped backticks — `` \` `` — are literal at this level and take effect when the body is re-parsed.)
+2. An unescaped backtick outside single quotes follows the open/nest/close quote rule (quoting.md §5.2): at backtick depth 0 it opens a substitution; inside one it NESTS one level (whitespace before; non-whitespace, non-quote rune after) or CLOSES one level. Nested backticks are preserved in the body and execute recursively when the body is re-parsed (quoting.md §6.3). Escaped backticks — `` \` `` — never reach the rule; they are literal at this level and yield a literal backtick character when the body is re-parsed.
 3. While inside an open substitution (parenthesis depth > 0, or backtick open), the body is preserved **verbatim**:
    - Whitespace does NOT split tokens; it is copied into the token.
    - Quote characters (`'`, `"`) are copied verbatim — they are not removed and they do NOT set the token's `WasQuoted`/`WasSingleQuoted` flags. They do update the body's own quote state (rule 4).
-   - Backslash escape sequences are copied verbatim (backslash retained). The escaped character is skipped for state purposes: it cannot close the substitution, toggle body quote state, or start a nested substitution.
+   - Backslash escape sequences are copied verbatim (backslash retained). The escaped character is skipped for state purposes: it cannot close the substitution, affect body quote state, or start a nested substitution.
    - Operator characters are NOT recognized; they are body content.
 
    The body takes effect when the substitution executes: the expander re-parses the body recursively with the full lexer (quotes, escapes, operators and all). This is why the body must be preserved exactly as written.
-4. Finding the closing delimiter — body quote state:
-   - Each `$(` begins a fresh quote context. The enclosing context (for example an open double quote around the whole substitution) is saved and restored when the substitution closes. `echo "$(date)"` is therefore valid: the `)` closes the substitution even though the outer double quote is still open.
-   - A `)` closes the innermost open `$(` only when the body's own single-quote and double-quote counts are even and no backtick opened inside the body is still open. Otherwise the `)` is body content. Both `echo $(echo ")")` and `echo $(echo ')')` are valid.
-   - Inside an open backtick substitution, single quotes are literal (they do not open a quote context — see quoting.md §5.3) and nothing except an unescaped backtick closes the body. Use `` \` `` for a literal backtick inside a backtick body.
+4. Finding the closing delimiter — body quote state (tracked with the same quoting.md §5.2 rule):
+   - Each `$(` — and each outermost backtick — begins a fresh quote context. The enclosing context (for example an open double quote around the whole substitution) is saved and restored when the substitution closes. `echo "$(date)"` is therefore valid: the `)` closes the substitution even though the outer double quote is still open.
+   - A `)` closes the innermost open `$(` only when the body context has no open single-quote region, no open double-quote region, and no open backtick (all three body depths are 0). Otherwise the `)` is body content. Both `echo $(echo ")")` and `echo $(echo ')')` are valid.
+   - Inside an open backtick body, single quotes are literal (they do not open a quote context — see quoting.md §5.3); double quotes update the body's own quote state but never prevent the body from closing; an unescaped backtick nests or closes the body per rule 2. Use `` \` `` for a literal backtick character inside a backtick body.
 5. Substitutions still open at end of input are lexer errors, using the same canonical strings as the analyzer (§9): `unclosed command substitution $(...)` and `unclosed backtick`.
 
 ### 7.2 Examples
@@ -528,17 +535,24 @@ The lexer reports scanning errors using the SAME canonical strings as the syntax
 
 | Condition | Error string |
 |-----------|--------------|
-| Unclosed single quote at end of input | `unclosed single quote` |
-| Unclosed double quote at end of input | `unclosed double quote` |
-| Backtick substitution still open at end of input | `unclosed backtick` |
+| Single-quote depth > 0 at end of input | `unclosed single quote` |
+| Double-quote depth > 0 at end of input | `unclosed double quote` |
+| Backtick depth > 0 at end of input | `unclosed backtick` |
 | `$(` depth > 0 at end of input | `unclosed command substitution $(...)` |
+
+Because a whitespace-preceded quote character can NEST (quoting.md §5.2), an input with an EVEN number of quote characters can still be unclosed. This is why the canonical strings carry no count-based suffix.
 
 ### 9.1 Examples
 
 ```
 echo 'hello          -> Error: unclosed single quote
+echo 'a 'b           -> Error: unclosed single quote
+                        (2 quotes - even count - but the 2nd NESTS: space
+                         before, b after; depth ends at 2)
 echo 'it'\''s ok'    -> Valid (the escaped \' does not count as a quote)
 echo "hello          -> Error: unclosed double quote
+echo "Total: "$N     -> Error: unclosed double quote
+                        (the 2nd " NESTS; write "Total: $N" - quoting.md §13.3)
 echo "say \"hi\""    -> Valid (escaped quotes don't count)
 echo $(date          -> Error: unclosed command substitution $(...)
 echo `date           -> Error: unclosed backtick
@@ -574,61 +588,86 @@ The lexer maintains these state variables:
 | `sawWord` | `bool` | A word exists since the last boundary (content appended OR a quote pair seen) |
 | `wasSingleQuoted` | `bool` | Current word contains single-quoted content |
 | `wasQuoted` | `bool` | Current word contains quoted content (any quote type) |
-| `inSingleQuotes` | `bool` | Single quote open in the CURRENT context |
-| `inDoubleQuotes` | `bool` | Double quote open in the CURRENT context |
-| `inBacktickBody` | `bool` | Current context is a backtick substitution body |
+| `singleQuoteDepth` | `int` | Open single-quote regions in the CURRENT context (quoting.md §5.1) |
+| `doubleQuoteDepth` | `int` | Open double-quote regions in the CURRENT context |
+| `backtickDepth` | `int` | Open backtick substitutions in the CURRENT context |
 | `dollarParenDepth` | `int` | Open `$(` count |
-| `contextStack` | stack | Saved quote state per substitution level (§7.1 rule 4) |
+| `contextStack` | stack | Saved `{singleQuoteDepth, doubleQuoteDepth, backtickDepth}` per substitution level (§7.1 rule 4) |
+
+The three quote depths follow the open/nest/close rule (quoting.md §5.2, exposed below as `quoteAction`). Depth 0 means "no region of that type open in this context"; a toggle model's booleans correspond to depth 0 vs. depth ≥ 1.
 
 ### 10.2 Processing Loop
 
-```
-for each rune c in input:
-    inBody := dollarParenDepth > 0 OR inBacktickBody
+The quote branches call `quoteAction(input, i, depth)` — the shared open/nest/close decision of quoting.md §5.2.2.
 
-    if c == '\\' AND NOT inSingleQuotes AND has next char:
+```
+for each rune c at index i in input:
+    inBody := dollarParenDepth > 0 OR backtickDepth > 0
+
+    if c == '\\' AND singleQuoteDepth == 0 AND has next char:
         if inBody: append '\\' and the next char verbatim (no conversion)
         else:      append the escape result (§5; \$ and \` gain the marker)
         skip next char; sawWord = true
-        continue
+        continue                                  // the escaped char never reaches quoteAction
 
-    if c == '$' AND next char == '(' AND NOT inSingleQuotes:
-        push {inSingleQuotes, inDoubleQuotes, inBacktickBody}; clear all three
+    if c == '$' AND next char == '(' AND singleQuoteDepth == 0:
+        push {singleQuoteDepth, doubleQuoteDepth, backtickDepth}; zero all three
         dollarParenDepth++
         append "$("; skip '('; sawWord = true
         continue
 
     if c == ')' AND dollarParenDepth > 0
-              AND NOT inSingleQuotes AND NOT inDoubleQuotes AND NOT inBacktickBody:
+              AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0 AND backtickDepth == 0:
         dollarParenDepth--
-        pop context (restore enclosing quote state)
+        pop context (restore enclosing quote depths)
         append ')'
         continue
 
-    if c == '`' AND NOT inSingleQuotes:
-        if inBacktickBody:  pop context           // closing backtick
-        else:               push context; clear; inBacktickBody = true
-        append '`'; sawWord = true
+    if c == '`' AND singleQuoteDepth == 0:
+        sawWord = true
+        switch quoteAction(input, i, backtickDepth):     // quoting.md §5.2.2
+        case Open:                                        // depth 0 -> 1
+            push {singleQuoteDepth, doubleQuoteDepth, backtickDepth}
+            singleQuoteDepth = 0; doubleQuoteDepth = 0
+            backtickDepth = 1
+        case Nest:                                        // nested backtick: body content
+            backtickDepth++
+        case Close:
+            backtickDepth--
+            if backtickDepth == 0: pop context (restore enclosing depths)
+        append '`'                                        // backticks always stay in the token
         continue
 
-    if c == '\'' AND NOT inDoubleQuotes AND NOT inBacktickBody:
-        toggle inSingleQuotes
-        if inBody: append '\''                    // body content, verbatim, no flags
+    if c == '\'' AND doubleQuoteDepth == 0 AND backtickDepth == 0:
+        sawWord = true
+        action := quoteAction(input, i, singleQuoteDepth)
+        if action == Open OR action == Nest: singleQuoteDepth++
+        else:                                singleQuoteDepth--
+        if inBody:
+            append '\''                       // body content, verbatim, no flags
         else:
-            sawWord = true                        // delimiter not appended
             wasSingleQuoted = true; wasQuoted = true
+            if action == Nest OR (action == Close AND singleQuoteDepth >= 1):
+                append '\''                   // nested quote: literal argument content
+            // else: outermost open/close - delimiter, not appended
         continue
 
-    if c == '"' AND NOT inSingleQuotes:
-        toggle inDoubleQuotes
-        if inBody: append '"'                     // body content, verbatim, no flags
+    if c == '"' AND singleQuoteDepth == 0:
+        sawWord = true
+        action := quoteAction(input, i, doubleQuoteDepth)
+        if action == Open OR action == Nest: doubleQuoteDepth++
+        else:                                doubleQuoteDepth--
+        if inBody:
+            append '"'                        // body content, verbatim, no flags
         else:
-            sawWord = true                        // delimiter not appended
             wasQuoted = true
+            if action == Nest OR (action == Close AND doubleQuoteDepth >= 1):
+                append '"'                    // nested quote: literal argument content
+            // else: outermost open/close - delimiter, not appended
         continue
 
     if c is an operator character (| & ; < >)
-              AND NOT inSingleQuotes AND NOT inDoubleQuotes AND NOT inBody:
+              AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0 AND NOT inBody:
         if c == '&' AND next char != '&':
             fall through                          // lone & is a literal character
         else:
@@ -638,7 +677,7 @@ for each rune c in input:
             emit {Content: operator, IsOperator: true}
             continue
 
-    if isSpace(c) AND NOT inSingleQuotes AND NOT inDoubleQuotes AND NOT inBody:
+    if isSpace(c) AND singleQuoteDepth == 0 AND doubleQuoteDepth == 0 AND NOT inBody:
         if sawWord: emit {Content: current, wasSingleQuoted, wasQuoted}
         reset current, flags, sawWord             // flags reset even if nothing emitted
         continue
@@ -646,16 +685,24 @@ for each rune c in input:
     append c to current; sawWord = true
 ```
 
+Notes:
+
+- The `'` and `"` branches strip only the OUTERMOST delimiters (Open from depth 0, Close to depth 0) outside substitution bodies; nested quote characters stay in the token (quoting.md §5.2 rule 3, §8.2).
+- A backtick's Open/Close (0↔1) transitions push/pop the context stack; Nest and nested Close do not — nested backticks are body content, re-parsed recursively at execution (§7.1, quoting.md §6.3).
+- In the whitespace and operator guards, "all quote depths 0 AND NOT inBody" is exactly the total-depth-0 condition of quoting.md §5.4.
+
 ### 10.3 Post-Loop Processing
 
-After the loop:
+After the loop (checks run in this order; the first match is the single error returned — §9.2):
 
-1. `inSingleQuotes` -> error `unclosed single quote`
-2. `inDoubleQuotes` -> error `unclosed double quote`
-3. `inBacktickBody` -> error `unclosed backtick`
+1. `singleQuoteDepth > 0` -> error `unclosed single quote`
+2. `doubleQuoteDepth > 0` -> error `unclosed double quote`
+3. `backtickDepth > 0` -> error `unclosed backtick`
 4. `dollarParenDepth > 0` -> error `unclosed command substitution $(...)`
 5. If `sawWord`, emit the final token
 6. Return token slice
+
+(The depths inspected are the current — innermost — context's; input that ends inside a substitution body reports the body's open quote region first, then the enclosing substitution.)
 
 ### 10.4 Complexity
 
