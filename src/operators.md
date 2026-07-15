@@ -1,7 +1,7 @@
 ---
 title: Operators Specification
 description: Control flow operators (pipe, AND, OR, semicolon), precedence rules, and short-circuit evaluation.
-recommend_after: parser.md
+recommend_after: expansion.md
 ---
 
 # Operators Specification

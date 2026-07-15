@@ -1,7 +1,7 @@
 ---
 title: Quoting Specification
 description: Quote semantics for single, double, and backtick quotes, including the depth-tracked nesting rule — Foundation Shell's flagship non-POSIX feature.
-recommend_after: lexer.md
+recommend_after: parser.md
 ---
 
 # Quoting Specification

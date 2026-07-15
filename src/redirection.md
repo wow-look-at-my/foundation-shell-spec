@@ -1,7 +1,7 @@
 ---
 title: I/O Redirection Specification
 description: Input/output redirection operators, file descriptor handling, and redirection ordering.
-recommend_after: parser.md
+recommend_after: operators.md
 ---
 
 # Foundation Shell I/O Redirection Specification
