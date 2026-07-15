@@ -21,8 +21,6 @@ Foundation Shell's lexer follows these principles:
 4. **Command-Substitution Awareness**: The lexer tracks `$(...)` parenthesis depth and backtick state so that an entire substitution — including embedded whitespace and quotes — stays in one token. Substitution bodies are preserved verbatim and re-parsed recursively when the substitution executes.
 5. **Unicode Support**: The lexer operates on runes, supporting full Unicode input.
 
-> **Note:** The quoting/expansion model built on these tokens is deliberately non-POSIX in specific, documented ways (whole-token expansion suppression, among others). See quoting.md §13 for the complete list.
-
 ### 1.2 Processing Pipeline Position
 
 ```
@@ -288,7 +286,7 @@ Tokens: [{Content: "echo"},
 
 ### 4.3 Backticks (`` `...` ``)
 
-Backticks delimit command substitution. The lexer tracks backtick state (a pure toggle, §7): an unescaped backtick outside single quotes opens a substitution and the next one closes it. Between the two, the body — including whitespace and quote characters — is preserved verbatim in the token.
+Backticks delimit command substitution. The lexer tracks backtick state (§7): an unescaped backtick outside single quotes opens a substitution and the next one closes it. Between the two, the body — including whitespace and quote characters — is preserved verbatim in the token.
 
 #### 4.3.1 Backtick Behavior in Lexer
 
@@ -445,7 +443,7 @@ The lexer recognizes command-substitution **delimiters** so that an entire subst
 ### 7.1 Substitution Scanning Rules
 
 1. An unescaped `$(` outside single quotes opens a command substitution and increments the parenthesis depth. `$(...)` may nest: each `$(` inside an open substitution increments the depth again.
-2. An unescaped backtick outside single quotes toggles backtick state. Backticks cannot nest: while a backtick substitution is open, the next unescaped backtick always closes it.
+2. An unescaped backtick outside single quotes toggles backtick state: it opens a substitution if none is open, and closes the open one otherwise. (For backtick nesting semantics see quoting.md §6.3; escaped backticks — `` \` `` — are literal at this level and take effect when the body is re-parsed.)
 3. While inside an open substitution (parenthesis depth > 0, or backtick open), the body is preserved **verbatim**:
    - Whitespace does NOT split tokens; it is copied into the token.
    - Quote characters (`'`, `"`) are copied verbatim — they are not removed and they do NOT set the token's `WasQuoted`/`WasSingleQuoted` flags. They do update the body's own quote state (rule 4).
@@ -457,7 +455,7 @@ The lexer recognizes command-substitution **delimiters** so that an entire subst
    - Each `$(` begins a fresh quote context. The enclosing context (for example an open double quote around the whole substitution) is saved and restored when the substitution closes. `echo "$(date)"` is therefore valid: the `)` closes the substitution even though the outer double quote is still open.
    - A `)` closes the innermost open `$(` only when the body's own single-quote and double-quote counts are even and no backtick opened inside the body is still open. Otherwise the `)` is body content. Both `echo $(echo ")")` and `echo $(echo ')')` are valid.
    - Inside an open backtick substitution, single quotes are literal (they do not open a quote context — see quoting.md §5.3) and nothing except an unescaped backtick closes the body. Use `` \` `` for a literal backtick inside a backtick body.
-5. Substitutions still open at end of input are lexer errors, using the same canonical strings as the analyzer (§9): `unclosed command substitution $(...)` and `unclosed backtick (odd count)`.
+5. Substitutions still open at end of input are lexer errors, using the same canonical strings as the analyzer (§9): `unclosed command substitution $(...)` and `unclosed backtick`.
 
 ### 7.2 Examples
 
@@ -530,21 +528,20 @@ The lexer reports scanning errors using the SAME canonical strings as the syntax
 
 | Condition | Error string |
 |-----------|--------------|
-| Single-quote count is odd at end of input | `unclosed single quote (odd count)` |
-| Double-quote count is odd at end of input | `unclosed double quote (odd count)` |
-| Backtick substitution still open at end of input | `unclosed backtick (odd count)` |
+| Unclosed single quote at end of input | `unclosed single quote` |
+| Unclosed double quote at end of input | `unclosed double quote` |
+| Backtick substitution still open at end of input | `unclosed backtick` |
 | `$(` depth > 0 at end of input | `unclosed command substitution $(...)` |
 
 ### 9.1 Examples
 
 ```
-echo 'hello          -> Error: unclosed single quote (odd count)
-echo 'it's fine'     -> Error: unclosed single quote (odd count)  (3 quotes - odd)
-echo 'it'\''s ok'    -> Valid (4 active single quotes; the escaped \' does not count)
-echo "hello          -> Error: unclosed double quote (odd count)
+echo 'hello          -> Error: unclosed single quote
+echo 'it'\''s ok'    -> Valid (the escaped \' does not count as a quote)
+echo "hello          -> Error: unclosed double quote
 echo "say \"hi\""    -> Valid (escaped quotes don't count)
 echo $(date          -> Error: unclosed command substitution $(...)
-echo `date           -> Error: unclosed backtick (odd count)
+echo `date           -> Error: unclosed backtick
 ```
 
 ### 9.2 Error Behavior
@@ -609,7 +606,7 @@ for each rune c in input:
         continue
 
     if c == '`' AND NOT inSingleQuotes:
-        if inBacktickBody:  pop context           // closing backtick (pure toggle)
+        if inBacktickBody:  pop context           // closing backtick
         else:               push context; clear; inBacktickBody = true
         append '`'; sawWord = true
         continue
@@ -653,9 +650,9 @@ for each rune c in input:
 
 After the loop:
 
-1. `inSingleQuotes` -> error `unclosed single quote (odd count)`
-2. `inDoubleQuotes` -> error `unclosed double quote (odd count)`
-3. `inBacktickBody` -> error `unclosed backtick (odd count)`
+1. `inSingleQuotes` -> error `unclosed single quote`
+2. `inDoubleQuotes` -> error `unclosed double quote`
+3. `inBacktickBody` -> error `unclosed backtick`
 4. `dollarParenDepth > 0` -> error `unclosed command substitution $(...)`
 5. If `sawWord`, emit the final token
 6. Return token slice
@@ -798,7 +795,7 @@ Foundation Shell's lexer differs from POSIX shell in several ways:
 | Word splitting after expansion | Supported | Not supported |
 | Glob/pathname expansion | Supported | Not supported |
 
-For the quoting/expansion model differences (whole-token expansion suppression, whole-token tilde suppression, and others), see quoting.md §13 — those differences are deliberate.
+For quoting-level differences from POSIX (quote nesting and related behavior), see quoting.md §13.
 
 ---
 

@@ -1,14 +1,12 @@
 ---
 title: Quoting Specification
-description: Quote handling for single, double, and backtick quotes; the canonical parity-based quote model and deliberate differences from POSIX.
+description: Quote handling for single, double, and backtick quotes with depth tracking for nested constructs.
 recommend_after: lexer.md
 ---
 
 # Quoting Specification
 
-> **Canonical for:** quote semantics (what quoting means for tokens and expansion), the parity quote model, and the quote-isolation rules. For tokenization mechanics see lexer.md; the authority map lives in the README.
-
-> **WARNING — deliberately non-POSIX.** Foundation Shell's quoting and expansion model intentionally differs from POSIX shells in specific, documented ways — most notably, expansion suppression is decided per whole token, not per quoted segment. The complete list is in §13. Everywhere else, quoting behaves the way a POSIX user would expect (in particular, same-type quotes pair up exactly as in POSIX — there is no special "quote nesting"). This warning resolves spec issue #7.
+> **Canonical for:** quote semantics (what quoting means for tokens and expansion), quote depth tracking, and the quote-isolation rules. For tokenization mechanics see lexer.md; the authority map lives in the README.
 
 ## 1. Overview
 
@@ -33,7 +31,7 @@ Quoting affects multiple stages of the processing pipeline:
 Input String
      |
      v
-  [ANALYZER] --> Syntax validation, error detection (highlighting/diagnostics)
+  [ANALYZER] --> Syntax validation, depth tracking, error detection
      |
      v
   [LEXER] --> Tokenization, escape processing, quote removal
@@ -45,15 +43,13 @@ Input String
   [PARSER] --> Command chain construction
 ```
 
-### 1.3 Two Scanners, One Model
+### 1.3 Two Analysis Systems
 
-Foundation Shell has two components that read quote syntax, and both implement the SAME canonical quote model defined in §5:
+Foundation Shell has two complementary systems for handling quotes:
 
-1. **Syntax Analyzer** (`src/internal/syntax/analyzer.go`): validates quoting for syntax highlighting and diagnostics. It counts quote characters and uses parity (even/odd) to decide state.
+1. **Syntax Analyzer** (`syntax/analyzer.go`): Performs depth-tracked quote validation for syntax highlighting and error detection. Uses even/odd count algorithm.
 
-2. **Lexer** (`src/internal/lexer/lexer.go`): performs actual tokenization. It uses boolean toggles for quote state.
-
-A count's parity and a boolean toggle are the same thing: character N of a quote type opens when N is odd and closes when N is even. The two components MUST agree on which inputs are valid (see highlighting.md §7.1).
+2. **Lexer** (`lexer/lexer.go`): Performs actual tokenization with quote state tracking. Uses traditional toggle-based state machine.
 
 ---
 
@@ -93,8 +89,8 @@ Output: back\\slash     (literal double backslash)
 **A single quote cannot appear inside single quotes.** There is no escape mechanism within single quotes.
 
 ```
-# INVALID - three single quotes (odd count)
-echo 'it's broken'    # Error: unclosed single quote (odd count)
+# INVALID - Cannot include literal single quote
+echo 'it's broken'    # Syntax error or unexpected behavior
 
 # WORKAROUND - End quotes, add escaped quote, restart quotes
 echo 'it'\''s working'
@@ -141,7 +137,7 @@ Input:  echo 'single'"double"unquoted
 Token:  {Content: "singledoubleunquoted", WasSingleQuoted: true, WasQuoted: true}
 ```
 
-This conservative approach prevents unintended expansion of the double-quoted and unquoted portions. (This is one of the deliberate POSIX differences — see §13.)
+This conservative approach prevents unintended expansion of the double-quoted and unquoted portions.
 
 ---
 
@@ -220,7 +216,6 @@ Backticks provide legacy command substitution syntax.
 | **Output Substitution** | Command output replaces the backtick expression |
 | **Trailing Newline Trimming** | Trailing newlines are removed from output |
 | **Not in Single Quotes** | Backticks inside single quotes are literal |
-| **Pure Toggle** | A backtick always closes an open backtick — backticks cannot nest (§6.3) |
 
 ### 4.2 Backtick Behavior
 
@@ -235,30 +230,32 @@ Input:  echo 'Today is `date`'
 Output: Today is `date`    (literal - single quotes)
 ```
 
-### 4.3 Two Substitution Syntaxes
+### 4.3 Modern Alternative: $()
 
 [include:_partials/command-substitution-syntax.md](_partials/command-substitution-syntax.md)
 
-`$(...)` is preferred: it nests naturally, while backticks require escaping:
-
 ```
+# Both produce the same result
+echo `date`
+echo $(date)
+
 # Nesting is cleaner with $()
-echo $(echo $(date))     # Easy - real nesting
-echo `echo \`date\``     # The inner backticks must be escaped (§6.3)
+echo $(echo $(date))     # Easy
+echo `echo \`date\``     # Harder to read
 ```
 
-### 4.4 Backtick State Is a Toggle
+### 4.4 Backtick Depth Tracking
 
-The syntax analyzer counts backticks; parity gives the state. Equivalently, backtick state is a pure toggle — the "second" backtick ALWAYS closes:
+The syntax analyzer tracks backtick depth for validation:
 
 ```go
-if c == '`' && singleQuoteCount%2 == 0 {
-    if backtickCount%2 == 0 {
+if c == '`' && singleQuoteDepth == 0 {
+    if backtickDepth%2 == 0 {
         // Opening backtick
     } else {
         // Closing backtick
     }
-    backtickCount++
+    backtickDepth++
 }
 ```
 
@@ -271,75 +268,72 @@ Error:  unclosed backtick (odd count)
 
 ---
 
-## 5. Quote State Tracking (The Parity Model)
+## 5. Quote Depth Tracking
 
-This section defines the canonical quote model. Both the analyzer and the lexer implement it (§1.3).
+Foundation Shell uses a sophisticated depth-tracking algorithm for quote validation.
 
 ### 5.1 The Even/Odd Count Algorithm
 
-For each quote type, the analyzer maintains a counter that counts quote CHARACTERS. The counter only ever increments; the PARITY of the count decides the state:
+For each quote type, the analyzer maintains a depth counter:
 
-- **Even count (0, 2, 4, ...)**: outside that quote type - all pairs balanced
-- **Odd count (1, 3, 5, ...)**: inside that quote type - a quote is open
+- **Even count (0, 2, 4, ...)**: Valid - all quotes are balanced
+- **Odd count (1, 3, 5, ...)**: Invalid - unclosed quote
 
 ```go
-// Single quote counting
-if c == '\'' && doubleQuoteCount%2 == 0 && backtickCount%2 == 0 {
-    if singleQuoteCount%2 == 0 {
-        // Opening quote - count goes 0->1, 2->3, ...
-        // (the analyzer records this position for error spans)
+// Single quote depth tracking
+if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 {
+    if singleQuoteDepth%2 == 0 {
+        // Opening quote - depth goes 0->1, 2->3, etc.
+        quoteStarts = append(quoteStarts, a.pos)
     } else {
-        // Closing quote - count goes 1->2, 3->4, ...
+        // Closing quote - depth goes 1->2, 3->4, etc.
+        if len(quoteStarts) > 0 {
+            quoteStarts = quoteStarts[:len(quoteStarts)-1]
+        }
     }
-    singleQuoteCount++
+    singleQuoteDepth++
 }
 ```
 
-**There is no quote "nesting".** Same-type quote characters simply pair up first-to-second, third-to-fourth, and so on — exactly the POSIX pairing. A counter parity and a boolean toggle are interchangeable descriptions of the same rule. True nesting depth exists ONLY for `$(...)` parentheses (§6.5), which is a real depth counter (increments AND decrements).
+### 5.2 Depth Counter Behavior
 
-### 5.2 Count Behavior
-
-| Single Quote Seen | Count | State |
-|-------------------|-------|-------|
+| Single Quote | Depth | State |
+|--------------|-------|-------|
 | (start) | 0 | Outside |
-| `'` | 1 | Inside (first pair open) |
-| `'` | 2 | Outside (first pair complete) |
-| `'` | 3 | Inside (second pair open) |
-| `'` | 4 | Outside (second pair complete) |
+| `'` | 1 | Inside |
+| `'` | 2 | Outside (one pair complete) |
+| `'` | 3 | Inside (second pair started) |
+| `'` | 4 | Outside (two pairs complete) |
 
 ### 5.3 Quote Isolation Rules
 
-Quote characters are only active (i.e. only toggle state) in certain contexts; elsewhere they are literal:
+Quotes are isolated from each other based on nesting context:
 
 | Context | Quote Behavior |
 |---------|---------------|
 | Single quotes active | Double quotes and backticks are literal |
-| Double quotes active | Single quotes are literal; backticks active |
-| Backticks active | Single quotes are literal; double quotes active |
-| Inside `$(...)` | Single quotes, double quotes, and backticks all active (fresh context, §6.5) |
+| Double quotes active | Single quotes are literal, backticks active |
+| Backticks active | Single quotes are literal, double quotes active |
 
 ```go
 // Single quotes only active when NOT in double quotes or backticks
-if c == '\'' && doubleQuoteCount%2 == 0 && backtickCount%2 == 0 { ... }
+if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 { ... }
 
-// Double quotes only active when NOT in single quotes or backticks... 
-// (backticks do NOT suppress double quotes:)
-if c == '"' && singleQuoteCount%2 == 0 { ... }
+// Double quotes only active when NOT in single quotes or backticks
+if c == '"' && singleQuoteDepth == 0 && backtickDepth == 0 { ... }
 
 // Backticks only active when NOT in single quotes
-if c == '`' && singleQuoteCount%2 == 0 { ... }
+if c == '`' && singleQuoteDepth == 0 { ... }
 ```
-
-All guards are PARITY checks (`%2 == 0`, "not currently inside") — never comparisons of the raw count against zero. A cumulative `== 0` guard would permanently disable tracking after the first completed pair (e.g. it would reject the documented workaround `echo 'it'\''s working'`).
 
 ### 5.4 Outside Quotes Detection
 
-A position is "outside all quotes" when all quote counts are even and no substitution is open:
+A position is "outside all quotes" when all depth counters have even values:
 
 ```go
-outsideQuotes := singleQuoteCount%2 == 0 &&
-                 doubleQuoteCount%2 == 0 &&
-                 backtickCount%2 == 0 &&
+outsideQuotes := singleQuoteDepth%2 == 0 &&
+                 doubleQuoteDepth%2 == 0 &&
+                 backtickDepth%2 == 0 &&
                  parenDepth == 0
 ```
 
@@ -348,119 +342,103 @@ This is used to determine:
 - Whether operators are recognized
 - Whether the input is syntactically complete
 
-(`parenDepth` is a true depth and is compared against zero; the quote counts use parity.)
-
 ### 5.5 Validation at End of Input
 
-At end of input, all quote counts must be even and all substitutions closed:
+At end of input, all depths must be even:
 
 ```go
-if singleQuoteCount%2 != 0 {
+if singleQuoteDepth%2 != 0 {
     errors = append(errors, "unclosed single quote (odd count)")
 }
-if doubleQuoteCount%2 != 0 {
+if doubleQuoteDepth%2 != 0 {
     errors = append(errors, "unclosed double quote (odd count)")
 }
-if backtickCount%2 != 0 {
+if backtickDepth%2 != 0 {
     errors = append(errors, "unclosed backtick (odd count)")
 }
 if parenDepth > 0 {
-    errors = append(errors, "unclosed command substitution $(...)")
+    errors = append(errors, "unclosed subshell $(...)")
 }
 ```
 
 ---
 
-## 6. Quote Pairs and Concatenation
+## 6. Nested Quotes
 
-Repeated quote pairs in one word concatenate — the same behavior as POSIX shells.
+Foundation Shell supports sophisticated nested quote handling through depth tracking.
 
-### 6.1 Repeated Single-Quote Pairs
+### 6.1 Nested Single Quotes
 
 Multiple pairs of single quotes can appear in a single word:
 
 ```
-Input:  echo 'a 'b' c'
-Counts:      1  2 3 4      (4 single quotes - even - valid)
+Input:  echo 'outer 'inner' end'
+Depth:       1      2      1    0
 
-# Pairs:  'a ' + b + ' c'  -> one token: a b c
+# This is VALID because:
+# - 4 single quotes total (even count)
+# - Final depth is 0
 ```
 
-The quote characters pair first-with-second and third-with-fourth. The unquoted segment between the pairs (`b`) is part of the same word. POSIX shells produce the identical token.
+**Note**: This behavior differs from traditional shells where `'outer 'inner' end'` would be parsed differently.
 
-### 6.2 Repeated Double-Quote Pairs
+### 6.2 Nested Double Quotes
 
-Similarly for double quotes:
+Similarly, double quotes can be nested:
 
 ```
 Input:  echo "echo "word""
-Counts:      1     2    34   (4 double quotes - even - valid)
+Depth:       1      2     1    0
 
-# Pairs:  "echo " + word + ""  -> one token: echo word
+# Valid due to even count (4 quotes)
 ```
 
-### 6.3 Backticks Cannot Nest
+### 6.3 Nested Backticks
 
-Backtick state is a pure toggle (§4.4): while a backtick substitution is open, the next unescaped backtick ALWAYS closes it. There is no way to nest backticks directly:
+Backticks support nesting through depth tracking:
 
 ```
 Input:  echo `echo `date``
-# The 2nd backtick CLOSES the first substitution (body: "echo ").
-# This does not nest; it is two adjacent substitutions and a stray backtick
-# (4 backticks -> valid syntax, but not nested execution).
+Depth:       1      2     1    0
+
+# Valid - processed innermost first
 ```
 
-To nest, escape the inner backticks — the escaped backticks are literal at the outer level and become active when the body is re-parsed:
+### 6.4 Mixed Nesting
 
-```
-Input:  echo `echo \`date\``
-# Outer body: echo \`date\`  ->  re-parsed, the inner substitution runs
-```
-
-Prefer `$(...)`, which nests naturally: `echo $(echo $(date))`.
-
-### 6.4 Mixed Quote Types
-
-Different quote types can be combined; the isolation rules (§5.3) make the inner characters literal:
+Different quote types can be mixed:
 
 ```
 Input:  echo "hello 'world'"
-# Single quotes are literal inside double quotes
+# Double quote depth: 1 (at 'world'), 1 (end) -> valid
+# Single quote is literal inside double quotes
 Output: hello 'world'
 
 Input:  echo 'hello "world"'
-# Double quotes are literal inside single quotes
+# Single quote depth: 1 (at "world"), 1 (end) -> valid
+# Double quote is literal inside single quotes
 Output: hello "world"
 ```
 
-### 6.5 Command Substitution Depth Tracking
+### 6.5 Subshell Depth Tracking
 
-The `$()` syntax uses parenthesis depth tracking — a true nesting depth, separate from the quote counts. The analyzer operates on `[]rune` (positions are rune indices — see diagnostics.md §9.6):
+The `$()` syntax uses parenthesis depth tracking, separate from quote depth:
 
 ```go
-// Handle $( command substitution
-if c == '$' && singleQuoteCount%2 == 0 &&
-    a.pos+1 < len(a.input) && a.input[a.pos+1] == '(' {
+// Handle $() subshell
+if c == '$' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) && a.input[a.pos+1] == '(' {
     parenDepth++
-    pushQuoteContext() // body quote state starts fresh
     // ...
 }
 
-// Handle closing ) for $(
-if c == ')' && parenDepth > 0 &&
-    singleQuoteCount%2 == 0 && doubleQuoteCount%2 == 0 {
+// Handle closing ) for $()
+if c == ')' && parenDepth > 0 && singleQuoteDepth == 0 {
     parenDepth--
-    popQuoteContext() // restore the enclosing quote state
     // ...
 }
 ```
 
-Two rules make this correct for real inputs (see lexer.md §7.1 for the full statement):
-
-1. **Fresh context per substitution**: each `$(` saves the enclosing quote counts and starts the body with clean state; the matching `)` restores them. `echo "$(date)"` is valid — the `)` closes the substitution even though the outer double quote is still open.
-2. **Quoted `)` is content**: a `)` inside the body's open quotes does not close the substitution — `echo $(echo ")")` is valid.
-
-Substitutions can be arbitrarily nested:
+Subshells can be arbitrarily nested:
 
 ```
 Input:  echo $(echo $(echo $(date)))
@@ -547,13 +525,13 @@ Tokens: ["echo", "hello\\"]
 
 ### 7.5 Escaped Quotes in Syntax Analyzer
 
-The syntax analyzer recognizes escaped characters to avoid counting them as quotes. The guard is a parity check, and the input is `[]rune`:
+The syntax analyzer recognizes escaped characters to avoid counting them as quotes:
 
 ```go
 // Handle escape sequences (outside single quotes)
-if c == '\\' && singleQuoteCount%2 == 0 && a.pos+1 < len(a.input) {
+if c == '\\' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) {
     next := a.input[a.pos+1]
-    // Escaped characters don't count toward quote state
+    // Escaped characters don't count toward quote depth
     builder.WriteRune(c)
     builder.WriteRune(next)
     a.pos += 2
@@ -561,7 +539,7 @@ if c == '\\' && singleQuoteCount%2 == 0 && a.pos+1 < len(a.input) {
 }
 ```
 
-This prevents `\"` from affecting double quote state.
+This prevents `\"` from affecting double quote depth.
 
 ---
 
@@ -684,9 +662,9 @@ The syntax analyzer assigns semantic types for syntax highlighting (canonical li
 ### 9.2 Semantic Type Determination
 
 ```go
-func (a *analyzer) determineWordType(value string, singleCount, doubleCount, backtickCount, parenDepth int) SemanticType {
+func (a *analyzer) determineWordType(value string, singleDepth, doubleDepth, backtickDepth, parenDepth int) SemanticType {
     // Check for errors first
-    if singleCount%2 != 0 || doubleCount%2 != 0 || backtickCount%2 != 0 || parenDepth > 0 {
+    if singleDepth%2 != 0 || doubleDepth%2 != 0 || backtickDepth%2 != 0 || parenDepth > 0 {
         return TypeError
     }
 
@@ -708,9 +686,19 @@ func (a *analyzer) determineWordType(value string, singleCount, doubleCount, bac
 
 A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a string type — it falls through to `TypeArgument`/`TypeCommand`. The string types apply only when the whole word is wrapped in one matching pair (highlighting.md §4.5).
 
-### 9.3 No Depth Field
+### 9.3 Depth Information
 
-`AnalyzedToken` carries `Type`, `Value`, `Start`, and `End` — there is no depth field in the analyzer's output. The quote counts and the parenthesis depth are internal scanning state only (§5, §6.5).
+Each token includes depth information for nested structures:
+
+```go
+type AnalyzedToken struct {
+    Type  SemanticType
+    Value string
+    Start int
+    End   int
+    Depth int  // Maximum nesting depth for this token
+}
+```
 
 ---
 
@@ -796,9 +784,9 @@ The canonical error-string table lives in diagnostics.md §5. The quote-related 
 
 | Error | Condition | Message |
 |-------|-----------|---------|
-| Unclosed single quote | Odd single quote count | `unclosed single quote (odd count)` |
-| Unclosed double quote | Odd double quote count | `unclosed double quote (odd count)` |
-| Unclosed backtick | Odd backtick count | `unclosed backtick (odd count)` |
+| Unclosed single quote | Unclosed single quote at end of input | `unclosed single quote` |
+| Unclosed double quote | Unclosed double quote at end of input | `unclosed double quote` |
+| Unclosed backtick | Unclosed backtick at end of input | `unclosed backtick` |
 | Unclosed command substitution | `parenDepth > 0` | `unclosed command substitution $(...)` |
 
 The lexer reports the same strings for the same conditions (lexer.md §9).
@@ -806,26 +794,26 @@ The lexer reports the same strings for the same conditions (lexer.md §9).
 ### 11.2 Error Detection Code
 
 ```go
-// Check for unclosed quotes (odd count)
-if singleQuoteCount%2 != 0 {
+// Check for unclosed quotes
+if singleQuoteDepth%2 != 0 {
     a.errors = append(a.errors, SyntaxError{
         Start:   start,
         End:     a.pos,
-        Message: "unclosed single quote (odd count)",
+        Message: "unclosed single quote",
     })
 }
-if doubleQuoteCount%2 != 0 {
+if doubleQuoteDepth%2 != 0 {
     a.errors = append(a.errors, SyntaxError{
         Start:   start,
         End:     a.pos,
-        Message: "unclosed double quote (odd count)",
+        Message: "unclosed double quote",
     })
 }
-if backtickCount%2 != 0 {
+if backtickDepth%2 != 0 {
     a.errors = append(a.errors, SyntaxError{
         Start:   start,
         End:     a.pos,
-        Message: "unclosed backtick (odd count)",
+        Message: "unclosed backtick",
     })
 }
 if parenDepth > 0 {
@@ -869,18 +857,18 @@ Input:  echo Hello $USER
 Output: Hello johndoe
 ```
 
-### 12.2 Quote Pairs (Parity)
+### 12.2 Nested Quotes (Depth Tracking)
 
 ```
 # Four single quotes - valid (even count)
 Input:  echo 'outer 'inner' outer'
-Counts:      1      2      3      4
-Valid:  YES  ->  one token: outer inner outer
+Depths: 0    1      2      1      0
+Valid:  YES
 
 # Three single quotes - invalid (odd count)
 Input:  echo 'outer 'inner'
-Counts:      1      2      3
-Valid:  NO - unclosed single quote (odd count)
+Depths: 0    1      2      1
+Valid:  NO - unclosed single quote
 ```
 
 ### 12.3 Mixed Quoting
@@ -953,29 +941,40 @@ Tokens: [grep, -r, func main, ./src]
 
 # Complex mixed quoting
 Input:  echo "Hello, "'"'"$USER"'"'"!"
-Token:  {Content: "Hello, \"$USER\"!", WasSingleQuoted: true, WasQuoted: true}
-# The single-quoted segments contribute literal " characters; all quote
-# DELIMITERS are removed. WasSingleQuoted suppresses expansion, so the
-# argument is exactly:  Hello, "$USER"!  ($USER is NOT expanded)
+Tokens: [echo, Hello, '", $USER (expanded), "'!]
+# Actually concatenates to: Hello, '"johndoe"'!
 ```
 
 ---
 
-## 13. Differences from POSIX Shells
+## 13. Differences from POSIX Shell
 
-Foundation Shell's quoting model is deliberately non-POSIX in the following ways. Everything not listed here follows POSIX conventions (in particular, quote pairing itself is identical to POSIX — see §5.1).
+| Feature | POSIX Shell | Foundation Shell |
+|---------|-------------|------------------|
+| Single quote nesting | Not allowed | Allowed via depth tracking |
+| Double quote nesting | Not allowed | Allowed via depth tracking |
+| `$'...'` ANSI-C quoting | Supported (Bash) | Not supported |
+| `$"..."` locale translation | Supported (Bash) | Not supported |
+| Line continuation `\<newline>` | Joins lines | Not supported |
+| Here-documents `<<` | Supported | Not supported |
+| Here-strings `<<<` | Supported (Bash) | Not supported |
+| `\` at EOL in double quotes | Line continuation | Not supported |
 
-1. **Whole-token expansion suppression** (`WasSingleQuoted`). POSIX decides expansion per quoted segment; Foundation Shell decides per token. In POSIX, `'a'$HOME` expands `$HOME` (the unquoted segment); in Foundation Shell the single-quoted `a` marks the WHOLE token, so the argument is the literal `a$HOME`.
+### 13.1 Key Behavioral Differences
 
-2. **Whole-token tilde suppression** (`WasQuoted`). Any quoted part of a token suppresses tilde expansion for the whole token: `echo "~"` and `echo ~"x"` are literal.
+**Quote Depth Tracking**: Foundation Shell allows what POSIX considers invalid:
 
-3. **Empty quoted strings produce empty arguments** — the same as POSIX, stated here because it is a common point of doubt: `echo ''` passes one empty-string argument to `echo`.
+```
+# Foundation Shell: VALID (4 quotes, even count)
+echo 'a 'b' c'
 
-4. **U+0001 is a reserved internal byte.** Input containing a literal U+0001 has undefined behavior (lexer.md §5.1.4). POSIX shells have no such reservation.
+# POSIX: Would be parsed as:
+# - 'a ' (single quoted)
+# - b (unquoted)
+# - ' c' (unclosed quote - ERROR)
+```
 
-5. **Operators are recognized only outside quotes** — the same as POSIX: `echo "|"` passes a literal `|` argument and does NOT create a pipeline (lexer.md §3.3.4).
-
-Syntax-level features POSIX has and Foundation Shell does not (`$'...'`, here-documents, line continuation, etc.) are listed in lexer.md §13.
+This is an intentional design choice for Foundation Shell's depth-based quote validation.
 
 ---
 
@@ -987,7 +986,7 @@ Paths are relative to the foundation-shell repository root:
 
 | File | Purpose |
 |------|---------|
-| `src/internal/syntax/analyzer.go` | Syntax analysis, parity tracking, error detection |
+| `src/internal/syntax/analyzer.go` | Syntax analysis, depth tracking, error detection |
 | `src/internal/lexer/lexer.go` | Tokenization, escape processing, quote removal |
 | `src/internal/expander/expander.go` | Variable/command expansion |
 | `src/pkg/parser/parser.go` | Command chain construction |
@@ -1036,6 +1035,7 @@ type AnalyzedToken struct {
     Value string
     Start int
     End   int
+    Depth int
 }
 
 type SyntaxError struct {
@@ -1054,12 +1054,13 @@ type SyntaxError struct {
 1. **Even/odd quote counts**: Test that even counts are valid, odd counts error
 2. **Quote isolation**: Verify quotes inside other quotes are literal (§5.3)
 3. **Escape processing**: Test all escape sequences in all contexts
-4. **Concatenation**: Test adjacent quoted segments and repeated pairs
+4. **Concatenation**: Test adjacent quoted segments
 5. **Empty strings**: Test that `""` and `''` produce empty tokens
-6. **Substitution bodies**: Quotes/escapes inside `$()`/backticks preserved verbatim; quoted `)` does not close
-7. **WasSingleQuoted/WasQuoted propagation**: Verify conservative flag behavior and per-boundary reset
-8. **Error messages**: Verify canonical strings (diagnostics.md §5) and positions
-9. **Lexer/analyzer agreement**: The two scanners accept exactly the same inputs (highlighting.md §7.1)
+6. **Nested structures**: Test deeply nested quotes and substitutions
+7. **Substitution bodies**: Quotes/escapes inside `$()`/backticks preserved verbatim; quoted `)` does not close
+8. **WasSingleQuoted/WasQuoted propagation**: Verify conservative flag behavior and per-boundary reset
+9. **Error messages**: Verify canonical strings (diagnostics.md §5) and positions
+10. **Lexer/analyzer agreement**: The two scanners accept exactly the same inputs (highlighting.md §7.1)
 
 ### 15.2 Edge Cases
 
@@ -1073,7 +1074,7 @@ echo ""''
 # Quote at word boundary
 echo hello"world"there
 
-# Substitution nesting with mixed quotes
+# Maximum nesting
 echo "$(echo '$(echo `date`)')"
 
 # Mixed escapes
@@ -1090,12 +1091,12 @@ Foundation Shell's quoting system provides:
 2. **Double quotes** for whitespace preservation with expansion
 3. **Backticks and $()** for command substitution
 4. **Escape sequences** for character-level control
-5. **Parity-based quote validation** (counts + even/odd state)
+5. **Depth tracking** for robust quote validation
 6. **Quote removal** during tokenization (substitution bodies preserved verbatim)
 7. **WasSingleQuoted / WasQuoted flags** for expansion control
 
 The system prioritizes:
 - Safety (conservative single-quote propagation)
-- Robustness (parity-based validation)
-- Compatibility (POSIX quote pairing; deliberate differences listed in §13)
-- Clarity (canonical error messages)
+- Robustness (depth-based validation)
+- Compatibility (standard shell conventions where practical)
+- Clarity (explicit error messages)

@@ -81,19 +81,19 @@ The third line begins with the literal string `error: ` followed by the error me
 
 **Example:**
 ```
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ### 2.4 Complete Single Error Example
 
 Input: `echo "hello`
-Error: Start=5, End=11, Message="unclosed double quote (odd count)"
+Error: Start=5, End=11, Message="unclosed double quote"
 
 Output:
 ```
 echo "hello
      ^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ---
@@ -231,9 +231,9 @@ The syntax analyzer detects these conditions, and the execution lexer emits the 
 
 | Error | Exact Message |
 |-------|---------------|
-| Unclosed single quote (odd count) | `unclosed single quote (odd count)` |
-| Unclosed double quote (odd count) | `unclosed double quote (odd count)` |
-| Unclosed backtick (odd count) | `unclosed backtick (odd count)` |
+| Unclosed single quote | `unclosed single quote` |
+| Unclosed double quote | `unclosed double quote` |
+| Unclosed backtick | `unclosed backtick` |
 | Unclosed `$(...)` | `unclosed command substitution $(...)` |
 | Leading chain operator | `unexpected operator at start: <op>` |
 | Trailing pipe, &&, or \|\| | `unexpected operator at end` |
@@ -260,7 +260,6 @@ The parser reports these exact strings (the `<...>` placeholders are filled with
 ### 5.3 Message Format Notes
 
 - All messages are lowercase
-- Messages use parenthetical clarification where helpful: `(odd count)`
 - Operator symbols in messages use the exact characters: `$(...)`
 - No trailing punctuation
 - The parser appends `: <op>` context to its operator errors; the analyzer's trailing-operator message carries no suffix (the caret already points at the operator)
@@ -315,7 +314,7 @@ Output:
 ```
 cat "unclosed
     ^^^^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 ---
@@ -348,14 +347,14 @@ Two errors require two independently unclosed constructs. (A `'` inside open dou
 Input: `echo $(foo "bar`
 
 Errors:
-1. Start=5, End=15, Message="unclosed double quote (odd count)"
+1. Start=5, End=15, Message="unclosed double quote"
 2. Start=5, End=15, Message="unclosed command substitution $(...)"
 
 Output:
 ```
 echo $(foo "bar
      ^^^^^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 
 echo $(foo "bar
      ^^^^^^^^^^
@@ -436,7 +435,7 @@ echo 2>>
 error: missing redirection target
 ```
 
-### 8.3 Unclosed Single Quote (Odd Count)
+### 8.3 Unclosed Single Quote
 
 **Input:** `echo 'hello`
 
@@ -446,23 +445,23 @@ error: missing redirection target
 ```
 echo 'hello
      ^^^^^^
-error: unclosed single quote (odd count)
+error: unclosed single quote
 ```
 
 **Additional example:**
 
-**Input:** `echo 'it` (one quote — odd count)
+**Input:** `echo 'it` (a single unclosed quote)
 
 **Output:**
 ```
 echo 'it
      ^^^
-error: unclosed single quote (odd count)
+error: unclosed single quote
 ```
 
 (Note: `echo 'it's` would be VALID — it contains two single quotes, an even count, and prints `its`.)
 
-### 8.4 Unclosed Double Quote (Odd Count)
+### 8.4 Unclosed Double Quote
 
 **Input:** `echo "hello`
 
@@ -472,7 +471,7 @@ error: unclosed single quote (odd count)
 ```
 echo "hello
      ^^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
 **Additional example:**
@@ -483,10 +482,10 @@ error: unclosed double quote (odd count)
 ```
 echo "a"b"
      ^^^^^
-error: unclosed double quote (odd count)
+error: unclosed double quote
 ```
 
-### 8.5 Unclosed Backtick (Odd Count)
+### 8.5 Unclosed Backtick
 
 **Input:** ``echo `hello`` (the input is `echo`, a space, one backtick, `hello` — no backslash)
 
@@ -496,7 +495,7 @@ error: unclosed double quote (odd count)
 ~~~
 echo `hello
      ^^^^^^
-error: unclosed backtick (odd count)
+error: unclosed backtick
 ~~~
 
 ### 8.6 Unclosed Command Substitution $(...)
@@ -723,9 +722,9 @@ func TestDiagnostic_ErrorName(t *testing.T) {
 | Missing redirect target `<` | `missing redirection target` | Operator position | Operator position + 1 |
 | Missing redirect target `2>` | `missing redirection target` | Operator position | Operator position + 2 |
 | Missing redirect target `2>>` | `missing redirection target` | Operator position | Operator position + 3 |
-| Odd single quotes | `unclosed single quote (odd count)` | Token start | Token end |
-| Odd double quotes | `unclosed double quote (odd count)` | Token start | Token end |
-| Odd backticks | `unclosed backtick (odd count)` | Token start | Token end |
+| Unclosed single quote | `unclosed single quote` | Token start | Token end |
+| Unclosed double quote | `unclosed double quote` | Token start | Token end |
+| Unclosed backtick | `unclosed backtick` | Token start | Token end |
 | Unclosed `$(` | `unclosed command substitution $(...)` | Token start | Token end |
 
 ---
