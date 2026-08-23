@@ -470,7 +470,7 @@ Operators MUST be matched longest-first to avoid incorrect tokenization:
 2. 2-character: `&&`, `||`, `>>`, `2>`
 3. 1-character: `|`, `;`, `>`, `<`, `(`, `)`
 
-`2>` and `2>>` are recognized only when the `2` begins a new word (i.e. the pending word is empty and the `2` is immediately followed by `>`); a `2` inside a longer word does not form a stderr redirection. `echo a2>f` therefore tokenizes as `a2`, `>`, `f` — matching the execution lexer (lexer.md §3.3.1). A single `&` is not an operator.
+`2>` and `2>>` are recognized only when the `2` begins a new word (i.e. the pending word is empty and the `2` is immediately followed by `>`); a `2` inside a longer word does not form a stderr redirection. `echo a2>f` therefore tokenizes as `a2`, `>`, `f` — matching the execution lexer (lexer.md §3.3.1). A single `&` is not an operator; it lexes as a word, and a word that is exactly `&` is reported as an error (§7.2).
 
 ### 4.5 Word Type Determination
 
@@ -653,6 +653,8 @@ The analyzer detects these error conditions (canonical strings: diagnostics.md �
 | Leading operator | First non-whitespace token is a chain operator | `unexpected operator at start: <op>` |
 | Trailing operator | Last non-whitespace token is `\|`, `&&`, or `\|\|` | `unexpected operator at end` |
 | Missing redirect target | Last non-whitespace token is a redirection | `missing redirection target` |
+| Background operator | A word token is exactly `&` (not a redirection target) | `background execution is not supported` |
+| Here-document | A `<` token is followed by a `<` token | `here-documents are not supported` |
 
 The leading- and trailing-token checks look at the last/first NON-WHITESPACE token — trailing blanks do not defeat them.
 

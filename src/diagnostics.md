@@ -238,6 +238,8 @@ The syntax analyzer detects these conditions, and the execution lexer emits the 
 | Leading chain operator | `unexpected operator at start: <op>` |
 | Trailing pipe, &&, or \|\| | `unexpected operator at end` |
 | Missing file after redirect | `missing redirection target` |
+| Lone unquoted `&` as a word | `background execution is not supported` |
+| `<` followed by `<` (here-document) | `here-documents are not supported` |
 
 Leading-operator detection is REQUIRED of the analyzer (so `| foo` gets a caret diagnostic, not just the parser's plain error line). The unclosed-`$(...)` message was renamed from the earlier `unclosed subshell $(...)` — "subshell" is reserved for future `()` grouping.
 
@@ -256,6 +258,8 @@ The parser reports these exact strings (the `<...>` placeholders are filled with
 | Redirection followed by an operator | `missing redirection target: <op> followed by operator <op2>` |
 | Redirection target empty after expansion | `empty redirection target` |
 | Unquoted redirection target starting with `&` | `file descriptor duplication is not supported: <word>` |
+| Lone unquoted `&` as a word | `background execution is not supported` |
+| `<` followed by `<` (here-document) | `here-documents are not supported` |
 | Lexer failure (wrapped) | `tokenization error: <lexer error>` |
 | Substitution failure (wrapped) | `command substitution error: <error>` |
 

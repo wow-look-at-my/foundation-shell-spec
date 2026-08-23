@@ -196,6 +196,8 @@ echo a&b     -> [echo, a&b]          (one word)
 echo a&&b    -> [echo, a, &&, b]
 ```
 
+This is a LEXING rule, not a licence to run `cmd &`. A `&` written as a word of its own is rejected by the parser (parser.md §Background Execution Is Guarded). The lexer still hands it back as a word — the guard belongs to the parser, which is the layer that can see the word stands alone.
+
 #### 3.3.3 Examples
 
 ```
@@ -922,11 +924,11 @@ Foundation Shell's lexer differs from POSIX shell in several ways:
 
 | Feature | POSIX Shell | Foundation Shell |
 |---------|-------------|------------------|
-| `&` background operator | Supported | Not an operator (literal character) |
+| `&` background operator | Supported | Not an operator (literal character); a lone `&` word is a guarded parse error (parser.md §Background Execution Is Guarded) |
 | `#` comments | Supported | Supported (word-start rule, §8) |
 | Newline separator | Hard list terminator | Soft `;` with continuation after chain operators (§3.4) |
 | Line continuation (`\newline`) | Joins lines | Not supported (`\<newline>` is a literal newline in the word) |
-| Here-documents (`<<`) | Supported | Not supported |
+| Here-documents (`<<`) | Supported | Not supported — guarded parse error (redirection.md §9.6) |
 | Process substitution (`<()`) | Bash extension | Not supported |
 | Arithmetic expansion (`$(())`) | Supported | Not supported |
 | Brace expansion (`{a,b}`) | Bash extension | Not supported |

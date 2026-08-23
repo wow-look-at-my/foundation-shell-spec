@@ -1123,7 +1123,7 @@ The neighbor conditions deliberately reduce to POSIX behavior for the common pat
 | `$'...'` ANSI-C quoting | Supported (Bash) | Not supported |
 | `$"..."` locale translation | Supported (Bash) | Not supported |
 | Line continuation `\<newline>` | Joins lines | Not supported |
-| Here-documents `<<` / here-strings `<<<` | Supported | Not supported |
+| Here-documents `<<` / here-strings `<<<` | Supported | Not supported — guarded parse error (redirection.md §9.6) |
 | `\` at EOL in double quotes | Line continuation | Not supported |
 | U+0001 in input | Ordinary data | Reserved internal byte; behavior undefined (lexer.md §5.1.4) |
 

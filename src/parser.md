@@ -175,8 +175,39 @@ The `buildChain` function validates syntax and constructs the command chain.
 | Redirection followed by operator | `ErrMissingRedirectionTarget: <redir> followed by operator <op>` |
 | Redirection target empty after expansion | `ErrEmptyRedirectionTarget` (redirection.md §9.4) |
 | Unquoted redirection target starting with `&` | `ErrFdDuplicationUnsupported: <word>` (redirection.md §9.5) |
+| Lone unquoted `&` as a word | `ErrBackgroundUnsupported` (§Background Execution Is Guarded) |
+| `<` followed by `<` | `ErrHeredocUnsupported` (redirection.md §9.6) |
 
 The exact user-visible strings are pinned in diagnostics.md §5.2.
+
+#### Background Execution Is Guarded
+
+**Condition:** A word token is exactly `&`, unquoted and unescaped.
+
+This shell has no background jobs, so the lexer hands back a lone `&` as an ordinary word (lexer.md §3.3.2). Accepted as a word, it does two silent things at once:
+
+```bash
+server &              # & becomes argv[1]; the server runs in the FOREGROUND
+                      # and the shell never returns
+cmd_a & cmd_b arg     # ONE command: cmd_a with args [&, cmd_b, arg].
+                      # cmd_b never runs, and nothing says so
+```
+
+Both outcomes are worse than the `2>&1` trap §9.5 already guards against: that one creates a stray file, this one hangs the shell or silently drops half the line. The parser rejects it for the same reason.
+
+**Behavior:**
+- Parse error: `background execution is not supported`
+- The check inspects the word AS WRITTEN, before expansion, and applies only when the word is exactly `&` with `WasQuoted == false` and `WasEscaped == false`
+- Every other `&` is untouched: `a&b` is one word, `&&` is an operator, and `'&'`, `"&"`, `\&` are literal ampersands
+
+```bash
+$ sleep 30 &
+background execution is not supported
+$ echo 'a & b'        # OK: quoted
+$ echo "u?x=1&y=2"    # OK: & inside a longer word
+```
+
+A caller that wants a command to outlive the shell runs it under a tool that owns that job — `nohup`, a supervisor, or the caller's own process manager.
 
 #### Trailing Semicolon
 
