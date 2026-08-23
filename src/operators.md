@@ -730,7 +730,7 @@ Foundation Shell operators follow POSIX shell semantics with these characteristi
 
 Potential future additions (not currently implemented):
 
-- Background operator (`&`)
+- Background operator (`&`) — today a lone `&` word is a guarded parse error (parser.md §Background Execution Is Guarded)
 - Subshell grouping with `()`
 - Brace grouping with `{}`
 - Negation operator (`!`)

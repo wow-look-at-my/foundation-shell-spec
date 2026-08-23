@@ -45,15 +45,19 @@ Input String
   [PARSER] --> Command chain construction
 ```
 
-### 1.3 Two Scanners, One Rule
+### 1.3 One Scanner, Two Views
 
-Foundation Shell has two complementary scanners that handle quotes:
+Foundation Shell has ONE scanner. `Scan` (lexer.md) walks the input once and returns tokens carrying everything any consumer needs: the text as written and its rune span, the expansion-ready content and quoting flags, the structural role, and the nesting depth. Whitespace and comments are tokens too, so the stream accounts for every rune of the input.
 
-1. **Syntax Analyzer** (highlighting.md): rune-based scanner for syntax highlighting and diagnostics. Preserves quote characters in token values and records positions and depths.
+Two views project from it, and neither re-scans:
 
-2. **Lexer** (lexer.md): the execution tokenizer. Removes outermost quote delimiters, processes escapes, and emits `TokenContext` values.
+1. **Execution** (lexer.md): drops whitespace and comments, materializes the `;` an unquoted newline stands for, and hands the parser `TokenContext` values with the outermost quote delimiters already removed.
 
-Both implement the SAME quote-state semantics — the open/nest/close rule of §5.2 with the context rules of §5.3. An input is valid to one scanner iff it is valid to the other; the conformance suite cross-checks this (highlighting.md §7.1).
+2. **Analysis** (highlighting.md): classifies the same tokens for the theme and renders positioned diagnostics. It keeps every character, because it must paint the line the user typed.
+
+Because both read one scan, an input cannot be valid to one and invalid to the other — not by agreement, but by construction. The quote-state semantics below (the open/nest/close rule of §5.2 with the context rules of §5.3) are therefore stated once and implemented once.
+
+This replaces an earlier design in which the analyzer carried its own complete copy of the tokenizer. Two implementations of one grammar drift, and they did: the copy treated `(` and `)` as operators while the executing lexer treated them as ordinary word characters, so a line could be highlighted as something other than what would run.
 
 ---
 
@@ -291,7 +295,7 @@ For a literal backtick *character*, escape it: `` \` `` is marked by the lexer a
 
 ## 5. Quote State Tracking
 
-Foundation Shell tracks quote state with per-type depth counters driven by a single open/nest/close rule. This section is the **normative statement of the rule**; both scanners (§1.3) implement it identically.
+Foundation Shell tracks quote state with per-type depth counters driven by a single open/nest/close rule. This section is the **normative statement of the rule**; the scanner (§1.3) implements it once, and both views inherit it.
 
 ### 5.1 Per-Type Depth Counters
 
@@ -341,7 +345,7 @@ At depth 0 the character always OPENS, whatever its neighbors.
 
 #### 5.2.2 Reference Algorithm
 
-Rune-based pseudocode shared by both scanners (the analyzer keeps every character and records positions; the lexer additionally strips outermost delimiters — lexer.md §10.2):
+Rune-based pseudocode for the scanner. It records positions and keeps the text as written for the analysis view, and builds the delimiter-stripped content for the execution view in the same pass (lexer.md §10.2):
 
 ```go
 type Action int
@@ -659,7 +663,7 @@ Tokens: ["echo", "hello\\"]
 
 ### 7.5 Escaped Quotes and Depth Tracking
 
-Both scanners consume an escape sequence as a unit BEFORE quote-state tracking sees it, so an escaped quote character can never open, nest, or close a region (§5.2 rule 5):
+The scanner consumes an escape sequence as a unit BEFORE quote-state tracking sees it, so an escaped quote character can never open, nest, or close a region (§5.2 rule 5):
 
 ```go
 // Handle escape sequences (outside single-quote regions: singleQuoteDepth == 0)
@@ -1123,7 +1127,7 @@ The neighbor conditions deliberately reduce to POSIX behavior for the common pat
 | `$'...'` ANSI-C quoting | Supported (Bash) | Not supported |
 | `$"..."` locale translation | Supported (Bash) | Not supported |
 | Line continuation `\<newline>` | Joins lines | Not supported |
-| Here-documents `<<` / here-strings `<<<` | Supported | Not supported |
+| Here-documents `<<` / here-strings `<<<` | Supported | Not supported — guarded parse error (redirection.md §9.6) |
 | `\` at EOL in double quotes | Line continuation | Not supported |
 | U+0001 in input | Ordinary data | Reserved internal byte; behavior undefined (lexer.md §5.1.4) |
 

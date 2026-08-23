@@ -32,8 +32,7 @@ This specification covers:
 - Error handling
 
 This specification does NOT cover (unsupported features):
-- Here-documents (`<<`)
-- Here-strings (`<<<`)
+- Here-documents (`<<`) and here-strings (`<<<`) — attempts are rejected with a dedicated parse error (§9.6); a FUTURE feature (§15)
 - File descriptor duplication (`2>&1`, `>&2`) — attempts are rejected with a dedicated parse error (§9.5); a FUTURE feature (§15)
 - Process substitution (`<(...)`, `>(...)`)
 - `/dev/null` or other special files (handled by the OS, not the shell)
@@ -482,11 +481,29 @@ file descriptor duplication is not supported: &1
 $ echo hi > '&1'      # OK: quoted - writes a file literally named &1
 ```
 
-### 9.6 Error Message Output
+### 9.6 Here-Documents Are Guarded
+
+**Condition:** A `<` operator is immediately followed by another `<` operator.
+
+Here-documents (`<<`) and here-strings (`<<<`) are documented FUTURE features (§15). The lexer has no `<<` operator, so `cat <<EOF` lexes as `<`, `<`, `EOF` (lexer.md §3.3). Reported by §9.3's rule that would be `missing redirection target: < followed by operator <`, which describes the token stream accurately and the reader's actual mistake not at all: it sends them looking for a filename, when the real answer is that the construct does not exist here. The parser names it instead:
+
+**Behavior:**
+- Parse error: `here-documents are not supported`
+- `<<<` is three `<`, forming two adjacent pairs. It reports ONCE — a doubled diagnostic for one construct teaches the reader to skim the output
+- A single `<` is unaffected: `cat < in.txt` is an ordinary input redirection
+
+```bash
+$ cat <<EOF
+here-documents are not supported
+$ cat <<<word
+here-documents are not supported
+```
+
+### 9.7 Error Message Output
 
 Runtime redirection errors are written to stderr — the ORIGINAL stderr if the failing redirection is `2>`/`2>>` itself (the error is reported before the redirection would have been applied).
 
-### 9.7 Error Summary
+### 9.8 Error Summary
 
 | Error Condition | Class | Exit Status | Message |
 |-----------------|-------|-------------|---------|
@@ -496,6 +513,7 @@ Runtime redirection errors are written to stderr — the ORIGINAL stderr if the 
 | Missing redirection target | Parse | line rejected; shell records 1 | `missing redirection target: <op>` |
 | Empty target after expansion | Parse | line rejected; shell records 1 | `empty redirection target` |
 | Unquoted target starting with `&` | Parse | line rejected; shell records 1 | `file descriptor duplication is not supported: <word>` |
+| `<` followed by `<` (here-document) | Parse | line rejected; shell records 1 | `here-documents are not supported` |
 
 ---
 
@@ -742,8 +760,8 @@ Foundation Shell implements a subset of POSIX shell redirection. Notable omissio
 | `2>&1` (duplicate fd) | Yes | No — guarded parse error (§9.5) |
 | `>&2` (stdout to stderr) | Yes | No — guarded parse error (§9.5) |
 | `&>` (stdout+stderr) | Bash extension | No |
-| `<<` (here-document) | Yes | No |
-| `<<<` (here-string) | Bash extension | No |
+| `<<` (here-document) | Yes | No — guarded parse error (§9.6) |
+| `<<<` (here-string) | Bash extension | No — guarded parse error (§9.6) |
 | `<>` (read-write) | Yes | No |
 | `n>` (arbitrary fd) | Yes | No (only 1 and 2) |
 | `exec` redirections | Yes | No |
