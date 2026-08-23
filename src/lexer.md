@@ -20,21 +20,33 @@ Foundation Shell's lexer follows these principles:
 3. **Operator Recognition**: The lexer recognizes operators directly (maximal munch, no whitespace required) and marks the resulting tokens with `IsOperator`. The parser maps marked operator tokens to formal token types and never re-derives operators from token content.
 4. **Command-Substitution Awareness**: The lexer tracks `$(...)` parenthesis depth and backtick state so that an entire substitution — including embedded whitespace and quotes — stays in one token. Substitution bodies are preserved verbatim and re-parsed recursively when the substitution executes.
 5. **Unicode Support**: The lexer operates on runes, supporting full Unicode input.
+6. **One Scanner**: `Scan` is the only tokenizer in the shell. Highlighting and diagnostics do not re-tokenize; they read the same scan (quoting.md §1.3). A rule stated in this file is therefore implemented once.
 
 ### 1.2 Processing Pipeline Position
+
+`Scan` walks the input once and returns a token per lexical unit — words, operators, whitespace runs and comments — so the stream accounts for EVERY rune. Each token carries the text as written with its rune span, the expansion-ready content with the quoting flags, the structural role, and the nesting depth. Alongside them it returns the unterminated constructs it found, rather than stopping at the first.
+
+Three consumers read that one scan:
 
 ```
 Input String
      |
      v
-  [LEXER] --> TokenContext[] (Content + WasSingleQuoted + WasQuoted + IsOperator)
+  [SCAN] --> Token[] (Raw + Start/End + Content + quoting flags + Role + Depth)
+     |            + Unclosed[]
      |
-     v
-  [PARSER] --> Operator mapping, expansion, classification
+     +--> [PROJECT] --> TokenContext[] --> [PARSER] --> [CHAIN BUILDER] --> CommandSpec
+     |                  (execution view: whitespace and comments dropped,
+     |                   newline materialized as ;)
      |
-     v
-  [CHAIN BUILDER] --> CommandSpec structures
+     +--> [VALIDATE] --> Problem[]  (the structural rules, ONE implementation;
+     |                   the parser renders them as errors, the analyzer as
+     |                   caret diagnostics — diagnostics.md §5.1 and §5.2)
+     |
+     +--> [ANALYZE] --> AnalyzedToken[] (highlighting.md: classification only)
 ```
+
+`Tokenize` is `Scan` plus `Project`, with the unterminated constructs turned into an error. It stays the parser's entry point for inputs that need no positions.
 
 ---
 

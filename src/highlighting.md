@@ -30,7 +30,7 @@ recommend_after: execution.md
 
 Foundation Shell provides real-time syntax highlighting for interactive shell input. The highlighting system is designed around three core principles:
 
-1. **Single Source of Truth**: The same `Analyze()` function powers both syntax highlighting AND syntax validation. This ensures consistent behavior between what the user sees highlighted and what the shell considers valid.
+1. **Single Source of Truth**: `Analyze()` powers both syntax highlighting AND syntax validation, and it tokenizes nothing itself — it classifies what the one scanner returns (quoting.md §1.3). What the user sees highlighted and what the shell will actually run come from the same pass over the input.
 
 2. **Semantic Token Types**: Highlighting is based on semantic meaning, not colors. Token types (e.g., `TypeCommand`, `TypeOperator`) are decoupled from visual presentation, allowing themes to customize appearance.
 
@@ -420,57 +420,34 @@ echo    hello            # Multiple spaces "   " is TypeWhitespace
 func Analyze(input string) *AnalysisResult
 ```
 
-The `Analyze` function is the **single source of truth** for syntax analysis. It performs:
-1. Tokenization with semantic classification
-2. Position tracking for each token
-3. Quote/substitution state tracking for nested constructs
-4. Error detection and reporting
+`Analyze` does NOT tokenize. `Scan` does (quoting.md §1.3), and `Analyze` is one of its two views: it calls `Scan` once and then
+
+1. classifies each token semantically, from the structural role the scanner already assigned;
+2. carries through the positions and nesting depths the scanner recorded;
+3. reports every unterminated construct the scanner found; and
+4. renders the problems `Validate` reports, which is the same rule set the parser rejects on.
+
+That division is the point. Highlighting cannot disagree with execution about what a token is, because it is not deciding.
 
 ### 4.2 State Machine
 
-The analyzer maintains internal state:
-
-```go
-type analyzer struct {
-    input            []rune          // Input as runes (Unicode support)
-    pos              int             // Current position
-    tokens           []AnalyzedToken // Accumulated tokens
-    errors           []SyntaxError   // Accumulated errors
-    isFirstInCommand bool            // Next word should be TypeCommand
-    afterRedirection bool            // Next word should be TypeRedirectionTarget
-}
-```
+The analyzer holds NO scanning state. Quote depths, the substitution stack, the position cursor and the command/redirection-target bookkeeping all live in the scanner, which resolves them before `Analyze` sees a token. What arrives is a flat slice in which every rune of the input is accounted for.
 
 ### 4.3 Analysis Flow
 
-1. **Initialize:** Set `isFirstInCommand = true`, `afterRedirection = false`
+1. **Scan once.** `Scan(input)` returns the tokens and the list of unterminated constructs.
 
-2. **Main Loop:** For each character position:
-   - If whitespace: consume and emit TypeWhitespace token
-   - If operator: match longest operator, emit token, update state
-   - Otherwise: parse word (handles quotes, variables, command substitutions)
+2. **Locate the unclosed word.** An unterminated construct swallows the rest of the input, so only the LAST word can carry one; it is typed `TypeError`.
 
-3. **Word Parsing:**
-   - Track quote depths (single, double, backtick)
-   - Track command-substitution depth
-   - Handle escape sequences
-   - Consume until word boundary (whitespace or operator)
+3. **Classify each token** (§4.5). Whitespace, comments and operators map directly; a word's type comes from its scanner-assigned role and its written form.
 
-4. **Finalization:**
-   - Check for unclosed quotes (any depth counter still positive — §9.2)
-   - Check for unclosed command substitutions
-   - Check for trailing operators (except `;`)
-   - Check for missing redirection targets
+4. **Report.** Every unterminated construct becomes an error at the word's span, innermost first (§9.2), followed by the problems `Validate` reports — the same rule set the parser rejects on, rendered with this surface's wording (diagnostics.md §5.1).
 
-### 4.4 Operator Matching Order
+### 4.4 Operator Matching
 
-Operators MUST be matched longest-first to avoid incorrect tokenization:
+Operator recognition belongs to the scanner (lexer.md §3.3), which matches longest-first: `2>>`, then `&&` `||` `>>` `2>`, then `|` `;` `>` `<`. `2>` and `2>>` apply only when the pending word is exactly an unquoted, unescaped `2`, so `echo a2>f` tokenizes as `a2`, `>`, `f`.
 
-1. 3-character: `2>>`
-2. 2-character: `&&`, `||`, `>>`, `2>`
-3. 1-character: `|`, `;`, `>`, `<`, `(`, `)`
-
-`2>` and `2>>` are recognized only when the `2` begins a new word (i.e. the pending word is empty and the `2` is immediately followed by `>`); a `2` inside a longer word does not form a stderr redirection. `echo a2>f` therefore tokenizes as `a2`, `>`, `f` — matching the execution lexer (lexer.md §3.3.1). A single `&` is not an operator; it lexes as a word, and a word that is exactly `&` is reported as an error (§7.2).
+Two characters are NOT operators and must not be highlighted as such. A single `&` lexes as a word, and a word that is exactly `&` is reported as an error (§7.2). Parentheses are ordinary word characters — `TypeParenGroup` is reserved for the subshell grouping operators.md lists as future work, and nothing produces it today.
 
 ### 4.5 Word Type Determination
 
@@ -481,7 +458,7 @@ After parsing a word, its type is determined by:
 3. **Quoted String:** If the ENTIRE word is wrapped in one matching quote pair, return the appropriate string type. A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a string type and falls through
 4. **Command Substitution:** If the word matches the `$(...)` pattern, return TypeCommandSubst
 5. **Variable:** If the word starts with `$` followed by a letter, underscore, or `{` (§3.10), return TypeVariable
-6. **Command vs Argument:** If `isFirstInCommand`, return TypeCommand; else TypeArgument
+6. **Command vs Argument:** From the scanner's role — `RoleCommand` returns TypeCommand, otherwise TypeArgument. The analyzer does not re-derive which word starts a command; the parser reads the same role to build the chain.
 
 ---
 
@@ -638,7 +615,9 @@ The same `Analyze()` function is used for BOTH:
 
 This ensures that any syntax error visible in highlighting is also reported as a diagnostic error, and vice versa.
 
-The promise extends across components: the analyzer and the execution lexer MUST accept exactly the same inputs — an input the analyzer marks valid must tokenize without error, and an input it rejects must fail tokenization. The conformance suite MUST include a lexer/analyzer validity cross-check (for every corpus input, `Tokenize` errors if and only if `Analyze().Valid` is false).
+The promise extends across components: analysis and execution MUST accept exactly the same inputs — an input `Analyze` marks valid must tokenize without error, and one it rejects must fail tokenization.
+
+This now holds by construction rather than by agreement. Both are views of a single `Scan` (quoting.md §1.3): the tokens come from one pass, and the structural rules from one `Validate`, so there is no second implementation to drift. The conformance suite MUST still cross-check it (for every corpus input, `Tokenize` errors if and only if `Analyze().Valid` is false), because the two views still differ in what they DO with a scan — the projection could lose a token, or a renderer could mislabel one.
 
 ### 7.2 Error Detection
 
@@ -751,7 +730,7 @@ The diagnostics system handles:
 
 ### 9.1 Purpose
 
-Depth tracking implements Foundation Shell's flagship non-POSIX feature: whitespace-delimited quote NESTING (quoting.md §5.2, §6). The analyzer implements the SAME open/nest/close rule as the execution lexer — quoting.md §5 is the canonical statement — and the §7.1 cross-check keeps the two scanners in lockstep. Unlike traditional shells, where a same-type quote character always closes, Foundation Shell lets it open an interior region; the depth counters track exactly that.
+Depth tracking implements Foundation Shell's flagship non-POSIX feature: whitespace-delimited quote NESTING (quoting.md §5.2, §6). The depth on each token comes from the scanner, which applies the open/nest/close rule once for execution and analysis alike — quoting.md §5 is the canonical statement. Unlike traditional shells, where a same-type quote character always closes, Foundation Shell lets it open an interior region; the depth counters track exactly that.
 
 ### 9.2 Depth Counting Rules
 
