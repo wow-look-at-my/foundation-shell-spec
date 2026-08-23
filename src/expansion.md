@@ -650,6 +650,26 @@ $ echo $?
 
 **Whole-input consequence:** non-interactive input (piped stdin, script files, `fsh-exec`) is parsed as ONE input (execution.md §Non-Interactive Mode). For `$?` the entire input is a single "line": every `$?` in a script expands to the shell's status from before the script ran (normally `0`). `$?` is therefore only useful across interactive lines.
 
+### Assignment Is Not Visible to the Same Input
+
+Parse-time expansion applies to ORDINARY variables as well, and there the consequence is sharper. A variable assigned in an input still expands to its pre-input value everywhere in that input:
+
+```bash
+OUT=$(echo captured) ; echo $OUT     # $OUT expanded BEFORE the assignment ran
+```
+
+The assignment itself is real — it mutates the shell's environment, and a child that reads the environment sees the new value. Only expansion inside the same input is stale, which is what makes the shape deceptive:
+
+```bash
+X=hi ; printenv X          # prints hi — the child reads the environment
+X=hi ; sh -c 'echo $X'     # prints hi — single quotes leave $X for the child
+X=hi ; echo $X             # $X is stale: would print an empty line
+```
+
+Left unguarded, the last form yields an empty string and reports SUCCESS. Every other unsupported construct in this specification stops the caller; this one would corrupt a result instead. The parser therefore rejects an input that assigns a variable and then expands it (parser.md §Assignment Then Use Is Guarded).
+
+To use a value, run the assignment and the use as SEPARATE inputs — separate interactive lines, or separate `fsh-exec` invocations. Within one input, hand the name to the child instead: `sh -c 'echo $X'`.
+
 ### NOT Supported: Other Special Parameters
 
 Every other POSIX special parameter stays LITERAL — by the recognition rule, a `$` followed by anything but a letter, underscore, `{`, `(`, or `?` is a literal character:

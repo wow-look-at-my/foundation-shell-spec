@@ -260,6 +260,7 @@ The parser reports these exact strings (the `<...>` placeholders are filled with
 | Unquoted redirection target starting with `&` | `file descriptor duplication is not supported: <word>` |
 | Lone unquoted `&` as a word | `background execution is not supported` |
 | `<` followed by `<` (here-document) | `here-documents are not supported` |
+| Variable assigned then expanded in one input | `variable is assigned and used in the same input: <name>` |
 | Lexer failure (wrapped) | `tokenization error: <lexer error>` |
 | Substitution failure (wrapped) | `command substitution error: <error>` |
 

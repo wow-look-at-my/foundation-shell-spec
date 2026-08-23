@@ -177,6 +177,7 @@ The `buildChain` function validates syntax and constructs the command chain.
 | Unquoted redirection target starting with `&` | `ErrFdDuplicationUnsupported: <word>` (redirection.md §9.5) |
 | Lone unquoted `&` as a word | `ErrBackgroundUnsupported` (§Background Execution Is Guarded) |
 | `<` followed by `<` | `ErrHeredocUnsupported` (redirection.md §9.6) |
+| Variable assigned then expanded in one input | `ErrAssignmentThenUse: <name>` (§Assignment Then Use Is Guarded) |
 
 The exact user-visible strings are pinned in diagnostics.md §5.2.
 
@@ -208,6 +209,28 @@ $ echo "u?x=1&y=2"    # OK: & inside a longer word
 ```
 
 A caller that wants a command to outlive the shell runs it under a tool that owns that job — `nohup`, a supervisor, or the caller's own process manager.
+
+#### Assignment Then Use Is Guarded
+
+**Condition:** A command expands `$NAME` when an EARLIER command in the same input assigned `NAME`.
+
+The whole input expands in one pass before any of it runs, so the expansion reads the value from before the input (expansion.md §Assignment Is Not Visible to the Same Input). Unguarded, `OUT=$(cmd); echo $OUT` prints an empty line and reports success — the one construct here that corrupts a result rather than stopping the caller.
+
+**Behavior:**
+- Parse error: `variable is assigned and used in the same input: <name>`
+- Commands are walked in order, and each command's references are tested against what EARLIER commands assigned, so a word never counts as referencing its own assignment (`X=$X` is legal)
+- Two forms arm the guard, because both mutate the shell and both are equally invisible to a later expansion: a standalone `NAME=VALUE` (§Standalone Assignment) and `export NAME=VALUE`
+- Redirection targets are checked with the command's words: `> $OUT` picks a filename, so a stale one is worse than a stale argument
+- A single-quoted reference is NOT a reference: `sh -c 'echo $X'` hands `$X` to the child, which resolves it against the environment the assignment really did set
+- Unlike the guards above, this one has no analyzer counterpart — the analyzer does not model expansion — so it prints as a plain `parse error:` line rather than a caret block (diagnostics.md §5.2)
+
+```bash
+$ OUT=$(echo hi) ; echo $OUT
+variable is assigned and used in the same input: OUT
+$ X=hi ; printenv X            # OK: the child reads the environment
+$ X=hi ; sh -c 'echo $X'       # OK: quoted, so the child expands it
+$ echo $X ; X=hi               # OK: the use precedes the assignment
+```
 
 #### Trailing Semicolon
 

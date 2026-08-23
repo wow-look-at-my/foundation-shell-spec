@@ -544,6 +544,9 @@ Effect: set the environment variable; status 0; no output.
 
 ```bash
 A=hello          # sets A=hello, status 0
+                 # ...but $A LATER IN THE SAME INPUT is a parse error:
+                 # the input already expanded (parser.md §Assignment Then
+                 # Use Is Guarded)
 A=               # sets A to the empty string
 A=$B             # sets A to B's value (expansion ran first)
 A=B=C            # sets A to "B=C" (first = splits)
