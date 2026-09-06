@@ -47,17 +47,17 @@ Input String
 
 ### 1.3 One Scanner, Two Views
 
-Foundation Shell has ONE scanner. `Scan` (lexer.md) walks the input once and returns tokens carrying everything any consumer needs: the text as written and its rune span, the expansion-ready content and quoting flags, the structural role, and the nesting depth. Whitespace and comments are tokens too, so the stream accounts for every rune of the input.
+Foundation Shell has ONE scanner. The scan (lexer.md) walks the input once and returns tokens. Each token carries everything any consumer needs. That is the text as written with its rune span, the expansion-ready content with its quoting flags, the structural role, and the nesting depth. Whitespace and comments are tokens too. The stream therefore accounts for every rune of the input.
 
 Two views project from it, and neither re-scans:
 
-1. **Execution** (lexer.md): drops whitespace and comments, materializes the `;` an unquoted newline stands for, and hands the parser `TokenContext` values with the outermost quote delimiters already removed.
+1. **Execution** (lexer.md): it drops whitespace and comments, and it materializes the `;` an unquoted newline stands for. It hands the parser `TokenContext` values whose outermost quote delimiters are already removed.
 
 2. **Analysis** (highlighting.md): classifies the same tokens for the theme and renders positioned diagnostics. It keeps every character, because it must paint the line the user typed.
 
 Because both read one scan, an input cannot be valid to one and invalid to the other — not by agreement, but by construction. The quote-state semantics below (the open/nest/close rule of §5.2 with the context rules of §5.3) are therefore stated once and implemented once.
 
-This replaces an earlier design in which the analyzer carried its own complete copy of the tokenizer. Two implementations of one grammar drift, and they did: the copy treated `(` and `)` as operators while the executing lexer treated them as ordinary word characters, so a line could be highlighted as something other than what would run.
+The alternative is a second scanner behind the analysis view. That design is forbidden here. Two scanners over one grammar drift apart, and the drift is invisible: a line gets highlighted as one thing and runs as another.
 
 ---
 
@@ -97,7 +97,7 @@ Output: back\\slash     (literal double backslash)
 
 Two mechanisms put a literal `'` inside a single-quoted argument:
 
-**1. Whitespace-delimited nesting (Foundation Shell extension — §6).** A `'` preceded by whitespace and followed by a non-whitespace, non-quote rune NESTS instead of closing (§5.2), and nested quote characters stay in the argument literally:
+**1. Whitespace-delimited nesting (Foundation Shell extension — §6).** A `'` preceded by whitespace and followed by a non-whitespace, non-quote rune NESTS instead of closing (§5.2). Nested quote characters stay in the argument literally:
 
 ```
 Input:  echo 'it 'really' works'
@@ -126,27 +126,16 @@ These concatenate into a single token: `it's working`
 
 ### 2.4 WasSingleQuoted Flag
 
-The lexer tracks whether any part of a token was single-quoted via the `WasSingleQuoted` flag in `TokenContext` (see lexer.md §2.1; single-quoted content also sets the broader `WasQuoted` flag):
+The lexer records whether any part of a token was single-quoted. The `WasSingleQuoted` flag in `TokenContext` carries that fact (lexer.md §2.1). Single-quoted content also sets the broader `WasQuoted` flag:
 
-```go
-type TokenContext struct {
-    Content         string
-    WasSingleQuoted bool  // True if ANY part was inside single quotes
-    WasQuoted       bool  // True if ANY part was inside any quotes
-    IsOperator      bool
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Content` | The token text, with the outermost quote delimiters removed |
+| `WasSingleQuoted` | True if ANY part of the token was inside single quotes |
+| `WasQuoted` | True if ANY part of the token was inside quotes of any type |
+| `IsOperator` | True if the token is an operator rather than a word |
 
-This flag is used by the expander to suppress all expansions:
-
-```go
-func Expand(token string, wasSingleQuoted bool) string {
-    if wasSingleQuoted {
-        return token  // No expansion performed
-    }
-    // ... perform expansions
-}
-```
+The expander reads `WasSingleQuoted` first. When it is true, the token passes through with no expansion of any kind. When it is false, the expansion pipeline runs (expansion.md §Expansion Order).
 
 ### 2.5 Conservative Single-Quote Propagation
 
@@ -216,7 +205,7 @@ Whitespace-delimited nesting is the escape-free alternative (§6.2): `echo "path
 
 ### 3.5 Preventing Expansion
 
-To include a literal `$` that should not trigger expansion:
+To include a literal `$` that must not trigger expansion:
 
 ```
 Input:  echo "cost is \$100"
@@ -276,8 +265,8 @@ echo `echo `date``
 Backtick state uses the same open/nest/close rule as the quote types (§5.2), applied when backticks are active (not inside single quotes — §5.3):
 
 - **Depth 0:** a backtick always opens a substitution.
-- **Depth ≥ 1:** a backtick NESTS one level (whitespace before; non-whitespace, non-quote rune after) or CLOSES one level.
-- Nested backticks stay in the body literally and execute recursively when the body is re-parsed (§6.3; lexer.md §7.1).
+- **Depth ≥ 1:** a backtick NESTS one level, with whitespace before it and a non-whitespace, non-quote rune after it. Otherwise it CLOSES one level.
+- Nested backticks stay in the body literally. They execute recursively when the body is re-parsed (§6.3, lexer.md §7.1).
 
 A backtick region still open at end of input is the canonical error `unclosed backtick` (§5.5). With nesting, even an EVEN number of backticks can be unclosed:
 
@@ -295,7 +284,7 @@ For a literal backtick *character*, escape it: `` \` `` is marked by the lexer a
 
 ## 5. Quote State Tracking
 
-Foundation Shell tracks quote state with per-type depth counters driven by a single open/nest/close rule. This section is the **normative statement of the rule**; the scanner (§1.3) implements it once, and both views inherit it.
+Foundation Shell tracks quote state with per-type depth counters driven by a single open/nest/close rule. This section is the **normative statement of the rule**. The scanner (§1.3) applies it once, and both views inherit it.
 
 ### 5.1 Per-Type Depth Counters
 
@@ -308,7 +297,7 @@ Each quote type has an independent depth counter that counts how many regions of
 | `backtickDepth` | `` ` `` | Inside (possibly nested) backtick substitution(s) |
 | `parenDepth` | `$(` / `)` | Inside (possibly nested) `$(...)` substitution(s) |
 
-Depth 0 means no region of that type is open. Depths never go negative (rule 1 below). A quote character drives its counter only when it is unescaped and **active** in the current context (§5.3); each command-substitution body begins a fresh quote context (§5.3).
+Depth 0 means no region of that type is open. Depths never go negative (rule 1 below). A quote character drives its counter only when it is unescaped and **active** in the current context (§5.3). Each command-substitution body begins a fresh quote context (§5.3).
 
 `parenDepth` needs no special rule: `$(` and `)` are distinct delimiters, so `$(` always increments and a closing `)` (one not inside an open body quote region) always decrements. The rule below exists because the three quote types use the SAME character to open and close.
 
@@ -318,16 +307,16 @@ For an **unescaped, active** quote character of a given type, with `depth` = tha
 
 1. **`depth == 0` → OPEN.** The character always opens a region of its type: depth becomes 1. Neighboring characters are irrelevant.
 2. **`depth >= 1` → NEST or CLOSE.** The character **nests** one level deeper (`depth+1`) **iff ALL of**:
-   - **(a)** the previous input rune is whitespace;
-   - **(b)** a next input rune exists and is not whitespace;
+   - **(a)** the previous input rune is whitespace
+   - **(b)** a next input rune exists and is not whitespace
    - **(c)** the next input rune is not any quote character (`'`, `"`, or `` ` ``).
 
    Otherwise it **closes** one level (`depth-1`). The region ends when depth returns to 0.
 3. **Literal retention.** Nested quote characters — every transition that does not touch depth 0 — remain **literally** in the argument. Only the outermost pair (the 0→1 opener and the 1→0 closer) is removed as delimiters (§8.1). Inside command-substitution bodies, even the outermost pair is preserved verbatim for the recursive parse (lexer.md §7.1).
-4. **Textual neighbor test.** Conditions (a)–(c) examine the raw adjacent runes without interpreting them (a backslash counts as the rune `\`; an already-processed delimiter counts as its quote rune). "Whitespace" is the same class used for word splitting (lexer.md §3.1.1). The previous rune always exists at depth ≥ 1 (at minimum it is the opener).
+4. **Textual neighbor test.** Conditions (a)–(c) examine the raw adjacent runes without interpreting them. A backslash counts as the rune `\`, and an already-processed delimiter counts as its quote rune. "Whitespace" is the same class used for word splitting (lexer.md §3.1.1). The previous rune always exists at depth ≥ 1 (at minimum it is the opener).
 5. **Escapes are invisible to the rule.** Escaped quote characters (backslash escape or escape marker, lexer.md §5) are consumed by escape processing and never reach this rule (§7.5). They neither open, nest, nor close.
 
-Intuition: a quote character nests only when it *looks like it is opening an interior quoted phrase* — preceded by a space, immediately followed by visible content that is not itself a quote. Everything else — attached to text (`it's`), at a word or input end (`'a '`), or adjacent to another quote (`''`, the §12.6 interleave) — closes, exactly as in POSIX.
+Intuition: a quote character nests only when it *looks like it is opening an interior quoted phrase*. A space precedes it, and visible content that is not itself a quote follows it. Every other position closes, exactly as in POSIX. Those positions are: attached to text (`it's`), at a word end or input end (`'a '`), and adjacent to another quote (`''`, the §12.6 interleave).
 
 #### 5.2.1 Decision Table
 
@@ -345,52 +334,43 @@ At depth 0 the character always OPENS, whatever its neighbors.
 
 #### 5.2.2 Reference Algorithm
 
-Rune-based pseudocode for the scanner. It records positions and keeps the text as written for the analysis view, and builds the delimiter-stripped content for the execution view in the same pass (lexer.md §10.2):
+Rune-based pseudocode for the scanner. It records positions and keeps the text as written for the analysis view. In the same pass it builds the delimiter-stripped content for the execution view (lexer.md §10.2):
 
-```go
-type Action int
+```
+QUOTE_ACTION(input, i, depth) -> OPEN | NEST | CLOSE
+    # input is a sequence of runes. i is the index of one unescaped,
+    # ACTIVE quote character. depth is the current counter of that
+    # quote type in the current context.
 
-const (
-    Open Action = iota
-    Nest
-    Close
-)
+    if depth == 0:
+        return OPEN                     # rule 1: depth 0 always opens
 
-// quoteAction decides what one unescaped, ACTIVE quote character at rune
-// index i does. depth is the current counter of that quote type in the
-// current context.
-func quoteAction(input []rune, i, depth int) Action {
-    if depth == 0 {
-        return Open // rule 1: depth 0 always opens
-    }
-    prevIsSpace := unicode.IsSpace(input[i-1]) // depth >= 1 implies i >= 1
-    nextExists := i+1 < len(input)
-    nextIsSpace := nextExists && unicode.IsSpace(input[i+1])
-    nextIsQuote := nextExists &&
-        (input[i+1] == '\'' || input[i+1] == '"' || input[i+1] == '`')
-    if prevIsSpace && nextExists && !nextIsSpace && !nextIsQuote {
-        return Nest // rule 2: depth+1; the character stays in the argument
-    }
-    return Close // rule 2: depth-1; region ends when depth returns to 0
-}
+    prev_is_space = IS_SPACE(input[i-1])   # depth >= 1 implies i >= 1
+    next_exists   = i+1 < LENGTH(input)
+    next_is_space = next_exists and IS_SPACE(input[i+1])
+    next_is_quote = next_exists and input[i+1] in { ' , " , ` }
+
+    if prev_is_space and next_exists
+       and not next_is_space and not next_is_quote:
+        return NEST                     # rule 2: depth+1, character kept
+
+    return CLOSE                        # rule 2: depth-1, region ends at 0
 ```
 
-Applying it (single quotes shown; double quotes and backticks are identical in shape):
+`IS_SPACE` is the whitespace predicate of lexer.md §4.1. Applying the action (single quotes shown, and the other two types are identical in shape):
 
-```go
-if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 { // active? (§5.3)
-    switch quoteAction(input, i, singleQuoteDepth) {
-    case Open, Nest:
-        singleQuoteDepth++
-        openPos = append(openPos, i) // region starts, for unclosed-error spans
-    case Close:
-        singleQuoteDepth--
-        openPos = openPos[:len(openPos)-1]
-    }
-}
+```
+if c == ' and double_quote_depth == 0 and backtick_depth == 0:   # active? (§5.3)
+    action = QUOTE_ACTION(input, i, single_quote_depth)
+    if action is OPEN or NEST:
+        single_quote_depth = single_quote_depth + 1
+        PUSH(open_positions, i)   # region start, for unclosed-error spans
+    if action is CLOSE:
+        single_quote_depth = single_quote_depth - 1
+        POP(open_positions)
 ```
 
-Whether the character is emitted or stripped depends on the transition: the lexer strips only the outermost delimiters (Open from 0 and Close to 0, outside substitution bodies) and keeps nested quote characters in the token (lexer.md §10.2).
+The transition decides whether the character is emitted or stripped. The lexer strips only the outermost delimiters, which are an OPEN from 0 and a CLOSE to 0, outside any substitution body. It keeps every nested quote character in the token (lexer.md §10.2).
 
 ### 5.3 Quote Isolation and Context Rules
 
@@ -401,19 +381,20 @@ Within an open quote region, only SAME-TYPE quote characters are subject to the 
 | Single-quote region | same-type rule (§5.2) | literal | literal | literal |
 | Double-quote region | literal | same-type rule (§5.2) | active (opens a substitution) | active (opens a substitution) |
 
-**Command-substitution bodies** (`$(...)` and backticks) each begin a **fresh quote context**: the enclosing depths are saved and restored when the body closes, and the body's quote characters are preserved verbatim in the token while still being TRACKED — with this same rule — for delimiter purposes (lexer.md §7.1):
+**Command-substitution bodies** (`$(...)` and backticks) each begin a **fresh quote context**. The scanner saves the enclosing depths. It restores them when the body closes. The body's quote characters stay verbatim in the token. The scanner still TRACKS them, under this same rule, to find the body's delimiter (lexer.md §7.1):
 
-- Inside a `$(...)` body, `'` and `"` drive the body context's own counters; a `)` closes the innermost `$(` only when the body context has no open quote region and no open backtick.
-- Inside a backtick body, single quotes are literal; double quotes update the body context's counter but never prevent the body from closing; an unescaped backtick nests or closes the body by §5.2.
-- When the substitution executes, the body is re-parsed recursively from scratch, so the delimiter the scanner chose is exactly the delimiter the recursive parse sees.
+- Inside a `$(...)` body, `'` and `"` drive the body context's own counters. A `)` closes the innermost `$(` only when the body context has no open quote region and no open backtick.
+- Inside a backtick body, single quotes are literal. Double quotes update the body context's counter, but they never prevent the body from closing. An unescaped backtick nests or closes the body by §5.2.
+- The body is re-parsed from scratch when the substitution executes. The delimiter the scanner chose is therefore the delimiter the recursive parse sees.
 
 ### 5.4 Word Boundaries: Total Depth
 
 The total depth is the sum of all four counters in the current context. Unquoted whitespace splits words **only at total depth 0**:
 
-```go
-totalDepth := singleQuoteDepth + doubleQuoteDepth + backtickDepth + parenDepth
-// whitespace is a word boundary iff totalDepth == 0
+```
+total_depth = single_quote_depth + double_quote_depth
+            + backtick_depth + paren_depth
+# whitespace is a word boundary if and only if total_depth == 0
 ```
 
 The same condition gates operator recognition (lexer.md §3.2, §10.2). Whitespace inside any open region — including nested levels — is content.
@@ -422,20 +403,12 @@ The same condition gates operator recognition (lexer.md §3.2, §10.2). Whitespa
 
 At end of input every counter must be 0. Any counter still positive reports the canonical error for its type (diagnostics.md §5):
 
-```go
-if singleQuoteDepth > 0 {
-    errors = append(errors, "unclosed single quote")
-}
-if doubleQuoteDepth > 0 {
-    errors = append(errors, "unclosed double quote")
-}
-if backtickDepth > 0 {
-    errors = append(errors, "unclosed backtick")
-}
-if parenDepth > 0 {
-    errors = append(errors, "unclosed command substitution $(...)")
-}
-```
+| Counter still positive | Reported error |
+|------------------------|----------------|
+| single_quote_depth | `unclosed single quote` |
+| double_quote_depth | `unclosed double quote` |
+| backtick_depth | `unclosed backtick` |
+| paren_depth | `unclosed command substitution $(...)` |
 
 Two consequences of the nesting rule, spelled out because they differ from parity-based models:
 
@@ -446,7 +419,7 @@ Two consequences of the nesting rule, spelled out because they differ from parit
 
 ## 6. Nested Quotes
 
-Depth-tracked quote nesting is Foundation Shell's flagship non-POSIX feature: a same-type quote pair can appear INSIDE an open quoted region, delimited by the neighbor conditions of §5.2, and the nested quote characters stay in the argument literally. This section shows the rule in action; the normative statement is §5.2. For what nesting buys — and costs — relative to POSIX, see §13.
+Depth-tracked quote nesting is Foundation Shell's flagship non-POSIX feature. A same-type quote pair can appear INSIDE an open quoted region, delimited by the neighbor conditions of §5.2. The nested quote characters stay in the argument literally. This section shows the rule in action. The normative statement is §5.2. For what nesting buys and costs against POSIX, see §13.
 
 ### 6.1 Nested Single Quotes
 
@@ -461,7 +434,7 @@ Input:  echo 'outer 'inner' end'
 | 3rd `'` | `r` | space | previous rune not whitespace → CLOSE | 1 |
 | 4th `'` | `d` | (end) | previous rune not whitespace → CLOSE | 0 |
 
-Result: ONE argument. The nested pair stays literally; the outermost pair is stripped:
+Result: ONE argument. The nested pair stays literally. The outermost pair is stripped:
 
 ```
 Tokens: [{Content: "echo"},
@@ -515,7 +488,7 @@ Output: path "/home/user" here    ($HOME expands; the nested quotes print)
 
 ### 6.3 Nested Backticks (Recursive Command Substitution)
 
-Backticks follow the same rule, and because a backtick region is a command substitution, nesting has EXECUTION semantics: the body — with its nested backticks preserved literally — is re-parsed on execution, so nested backticks execute **recursively**.
+Backticks follow the same rule. A backtick region is a command substitution, so nesting here has EXECUTION semantics. The body keeps its nested backticks literally. Execution re-parses that body, and the nested backticks therefore execute **recursively**.
 
 ```
 Input:  echo `outer `inner` end`
@@ -526,7 +499,7 @@ The lexer emits one token containing the whole substitution (lexer.md §7). When
 
 1. The outer body is `` outer `inner` end ``.
 2. Re-parsing the body finds `` `inner` `` at depth 0 — an inner substitution.
-3. `inner` runs first; its output substitutes into the body; then `outer <output> end` runs; the outer output replaces the original expression.
+3. `inner` runs first. Its output substitutes into the body. Then `outer <output> end` runs, and the outer output replaces the original expression.
 
 ```
 Input:  echo `echo `date``
@@ -536,9 +509,9 @@ Input:  echo `echo `date``
 # Executes date, then echo <date output>.
 ```
 
-POSIX backticks cannot nest without escaping. Note the Foundation Shell difference in the other direction too: an ESCAPED backtick (`` \` ``) is always a literal backtick *character* here (lexer.md §5.1–5.2) — it is never the POSIX-style nesting mechanism. To nest, just nest (per the rule); to get a literal backtick character, escape it.
+POSIX backticks cannot nest without escaping. The Foundation Shell difference runs in the other direction too. An ESCAPED backtick (`` \` ``) is always a literal backtick *character* here (lexer.md §5.1–5.2). It is never the POSIX-style nesting mechanism. To nest, just nest, under the rule above. To get a literal backtick character, escape it.
 
-An unclosed backtick region reports `unclosed backtick` (§5.5), including the even-count case: `` echo `a `b `` nests at the second backtick and ends at depth 2.
+An unclosed backtick region reports `unclosed backtick` (§5.5). This covers the even-count case too. In `` echo `a `b ``, the second backtick nests, and the input ends at depth 2.
 
 ### 6.4 Mixed Quote Types
 
@@ -555,25 +528,23 @@ Input:  echo "run `date` now"
 # Backticks stay ACTIVE inside double quotes: the substitution executes.
 ```
 
-Each type nests only against itself; the four depth counters are independent (§5.1).
+Each type nests only against itself. The depth counters are independent of each other (§5.1).
 
 ### 6.5 Command-Substitution Depth (`$(...)`)
 
 `$(...)` nests by explicit delimiters — `$(` always opens, and a `)` at body depth 0 always closes (§5.1, lexer.md §7.1). The §5.2 neighbor rule is not involved:
 
-```go
-// Handle $( command substitution
-if c == '$' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) && a.input[a.pos+1] == '(' {
-    parenDepth++
-    // ... push a fresh body quote context (§5.3)
-}
+```
+# Opening $(
+if c == $ and single_quote_depth == 0 and next rune is ( :
+    paren_depth = paren_depth + 1
+    PUSH a fresh body quote context (§5.3)
 
-// Handle closing ) — only when no body quote region is open
-if c == ')' && parenDepth > 0 &&
-    singleQuoteDepth == 0 && doubleQuoteDepth == 0 && backtickDepth == 0 {
-    parenDepth--
-    // ... pop the body context
-}
+# Closing ) — only when no body quote region is open
+if c == ) and paren_depth > 0 and single_quote_depth == 0
+   and double_quote_depth == 0 and backtick_depth == 0:
+    paren_depth = paren_depth - 1
+    POP the body context
 ```
 
 Command substitutions can be arbitrarily nested:
@@ -597,38 +568,29 @@ Backslash escapes provide character-level quoting outside of single quotes.
 
 When `\$` (or `` \` ``) is processed, the lexer does not simply produce the bare character. Instead, it produces the sequence `\x01$` (escape marker + character):
 
-```go
-const EscapeMarker = '\x01'  // ASCII SOH (Start of Heading)
+```
+ESCAPE_MARKER = U+0001   # ASCII SOH (Start of Heading)
 
-case '$':
-    // \$ becomes marker + $ to prevent expansion
-    current.WriteRune(EscapeMarker)
-    current.WriteRune('$')
-case '`':
-    // \` becomes marker + ` to prevent command substitution
-    current.WriteRune(EscapeMarker)
-    current.WriteRune('`')
+on \$ :  emit ESCAPE_MARKER, then emit $    # blocks expansion
+on \` :  emit ESCAPE_MARKER, then emit `    # blocks command substitution
 ```
 
-U+0001 is a reserved internal byte; input containing a literal U+0001 has undefined behavior (lexer.md §5.1.4).
+U+0001 is a reserved internal byte. Input that contains a literal U+0001 has undefined behavior (lexer.md §5.1.4).
 
 ### 7.2 Escape Marker Lifecycle
 
 1. **Lexer stage**: `\$VAR` becomes `\x01$VAR` in token content
 2. **Expander stage**: Sees `\x01$`, recognizes escaped dollar, keeps `$VAR` literal
-3. **Post-expansion**: `StripEscapeMarkers()` removes remaining `\x01` — unconditionally, for every value token (lexer.md §11.3)
+3. **Post-expansion**: a final pass removes every remaining `\x01`, unconditionally, from every value token (lexer.md §11.3)
 
-```go
-// In expander
-if i < len(token)-1 && token[i] == '\x01' && token[i+1] == '$' {
-    // Escaped dollar - write literal $ and skip the marker
-    result.WriteByte('$')
-    i += 2
-    continue
-}
+```
+# In the expander
+if token[i] == \x01 and token[i+1] == $ :
+    emit a literal $
+    advance past both runes      # the marker itself is never emitted
 
-// Post-expansion cleanup (every value token, single-quoted included)
-expandedValue = lexer.StripEscapeMarkers(expandedValue)
+# Post-expansion cleanup, on every value token, single-quoted included
+expanded_value = STRIP_ESCAPE_MARKERS(expanded_value)
 ```
 
 ### 7.3 Escape Examples
@@ -663,22 +625,18 @@ Tokens: ["echo", "hello\\"]
 
 ### 7.5 Escaped Quotes and Depth Tracking
 
-The scanner consumes an escape sequence as a unit BEFORE quote-state tracking sees it, so an escaped quote character can never open, nest, or close a region (§5.2 rule 5):
+The scanner consumes an escape sequence as a unit BEFORE quote-state tracking sees it. An escaped quote character can therefore never open, nest, or close a region (§5.2 rule 5):
 
-```go
-// Handle escape sequences (outside single-quote regions: singleQuoteDepth == 0)
-if c == '\\' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) {
-    next := a.input[a.pos+1]
-    // The escaped character never reaches quoteAction (§5.2.2):
-    // it cannot affect any depth counter.
-    builder.WriteRune(c)
-    builder.WriteRune(next)
-    a.pos += 2
-    continue
-}
+```
+# Escape sequences, outside single-quote regions (single_quote_depth == 0)
+if c == \ and a next rune exists:
+    emit c, then emit that next rune
+    advance past both runes
+    # The escaped rune never reaches QUOTE_ACTION (§5.2.2).
+    # It can change no depth counter.
 ```
 
-This keeps `\"` from touching double-quote depth, and `\'` / `` \` `` from touching theirs. The neighbor test is unaffected in the other direction: as raw runes, a backslash or an already-processed delimiter participates in the §5.2 conditions (a)–(c) like any other rune (§5.2 rule 4).
+This keeps `\"` from touching double-quote depth, and `\'` / `` \` `` from touching theirs. The neighbor test stays unchanged in the other direction. As raw runes, a backslash and an already-processed delimiter each take part in conditions (a)–(c) like any other rune (§5.2 rule 4).
 
 ---
 
@@ -698,7 +656,7 @@ Token:  {Content: "hello world", WasSingleQuoted: true, WasQuoted: true}
 # Note: The ' characters are not in Content
 ```
 
-**Exception:** quote characters inside a command-substitution body are NOT delimiters at the outer level — they are preserved verbatim in the token and take effect when the body is re-parsed (lexer.md §7.1):
+**Exception:** quote characters inside a command-substitution body are NOT delimiters at the outer level. The token keeps them verbatim. They take effect when the body is re-parsed (lexer.md §7.1):
 
 ```
 Input:  echo $(echo "a  b")
@@ -707,7 +665,7 @@ Token:  {Content: "$(echo \"a  b\")", WasQuoted: false}
 
 ### 8.2 How Quote Removal Works
 
-The lexer applies the §5.2 rule to each active quote character and emits or skips it depending on the transition. The full state machine is normative in lexer.md §10.2; in outline:
+The lexer applies the §5.2 rule to each active quote character and emits or skips it depending on the transition. The full state machine is normative in lexer.md §10.2. In outline:
 
 | Transition (§5.2) | Inside a substitution body? | Character emitted? | Flags |
 |-------------------|-----------------------------|--------------------|-------|
@@ -719,14 +677,14 @@ The lexer applies the §5.2 rule to each active quote character and emits or ski
 
 The syntax analyzer **preserves** quotes in token values for highlighting purposes:
 
-```go
-// Analyzer token
+```
+# Analyzer token
 {Type: TypeSingleQuotedString, Value: "'hello world'", ...}
-# Includes quote characters
+# Includes the quote characters
 
-// Lexer token
+# Lexer token
 {Content: "hello world", WasSingleQuoted: true, WasQuoted: true}
-# Excludes quote characters
+# Excludes the quote characters
 ```
 
 This difference exists because:
@@ -748,7 +706,7 @@ Lexer:  [{Content: "echo"},
          {Content: "arg"}]
 ```
 
-The quoting flags reset at every word boundary, so the quotes of an empty token never leak into the next word: in `echo '' $HOME`, the `$HOME` token has `WasSingleQuoted: false` and is expanded.
+The quoting flags reset at every word boundary. The quotes of an empty token therefore never leak into the next word. In `echo '' $HOME`, the `$HOME` token has `WasSingleQuoted: false`, and the expander expands it.
 
 ### 8.5 Adjacent Quote Concatenation
 
@@ -783,27 +741,21 @@ The syntax analyzer assigns semantic types for syntax highlighting (canonical li
 
 ### 9.2 Semantic Type Determination
 
-```go
-func (a *analyzer) determineWordType(value string, singleDepth, doubleDepth, backtickDepth, parenDepth int) SemanticType {
-    // Check for errors first
-    if singleDepth%2 != 0 || doubleDepth%2 != 0 || backtickDepth%2 != 0 || parenDepth > 0 {
-        return TypeError
-    }
+```
+WORD_TYPE(value, depths) -> SemanticType
 
-    // Check for quote types (when entire token is quoted)
-    if len(value) >= 2 {
-        if value[0] == '\'' && value[len(value)-1] == '\'' {
-            return TypeSingleQuotedString
-        }
-        if value[0] == '"' && value[len(value)-1] == '"' {
-            return TypeDoubleQuotedString
-        }
-        if value[0] == '`' && value[len(value)-1] == '`' {
-            return TypeBacktick
-        }
-    }
-    // ...
-}
+    # Errors come first: any counter left open makes the word an error.
+    if any counter in depths is non-zero:
+        return TypeError
+
+    # Then the whole-word quote types. The word must open and close
+    # with ONE matching delimiter pair.
+    if value starts and ends with ' :  return TypeSingleQuotedString
+    if value starts and ends with " :  return TypeDoubleQuotedString
+    if value starts and ends with ` :  return TypeBacktick
+
+    # Otherwise the word falls through to the positional types
+    # (TypeCommand, TypeArgument) of highlighting.md §3.
 ```
 
 A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a string type — it falls through to `TypeArgument`/`TypeCommand`. The string types apply only when the whole word is wrapped in one matching pair (highlighting.md §4.5).
@@ -812,17 +764,14 @@ A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a st
 
 Each token includes depth information for nested structures:
 
-```go
-type AnalyzedToken struct {
-    Type  SemanticType
-    Value string
-    Start int
-    End   int
-    Depth int  // Max nesting level reached in this token (§5.4 high-water mark)
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Type` | The semantic type (§9.1, highlighting.md §3) |
+| `Value` | The token text as written, quote characters included |
+| `Start`, `End` | The token's rune span in the input |
+| `Depth` | The maximum nesting level reached in this token (§5.4 high-water mark) |
 
-`Depth` is defined precisely as the maximum nesting level reached within the token, across quote regions and command substitutions — the high-water mark of the total depth (§5.4) over the token's span (canonical definition and examples: highlighting.md §9.4). A plain `'a'` has Depth 1; `'a 'b' c'` has Depth 2; unquoted `foo` has Depth 0.
+`Depth` is the maximum nesting level reached within the token, across quote regions and command substitutions alike. It is the high-water mark of the total depth (§5.4) over the token's span. The canonical definition and its examples live in highlighting.md §9.4. A plain `'a'` has Depth 1. The token `'a 'b' c'` has Depth 2, and unquoted `foo` has Depth 0.
 
 ---
 
@@ -840,14 +789,14 @@ Command substitution:
 3. Removes trailing newlines
 4. Replaces the substitution with output
 
-```go
-// Trim trailing newlines (standard shell behavior)
-output = strings.TrimRight(output, "\n")
+```
+# Trim trailing newlines (standard shell behavior)
+output = REMOVE every trailing newline from output
 ```
 
 ### 10.3 Innermost-First Through Recursion
 
-Nested substitutions complete innermost-first as a CONSEQUENCE of recursion, not of textual re-scanning: the substitution body is re-parsed with the same parser and executor, so substitutions inside the body expand during that recursive parse (expansion.md §Recursive Execution).
+Nested substitutions complete innermost-first as a CONSEQUENCE of recursion. No textual re-scanning is involved. The same parser and executor re-parse the substitution body. Substitutions inside that body therefore expand during the recursive parse (expansion.md §Recursive Execution).
 
 Substitution OUTPUT is never re-scanned for further substitutions — `$(...)` or backticks appearing in a command's output are literal text (expansion.md §Single-Pass Expansion).
 
@@ -865,27 +814,20 @@ Output: Mon Jan 12 10:30:00 UTC 2026
 
 ### 10.5 Balanced Parentheses
 
-The `$()` syntax requires balanced parentheses, counted with the BODY's own quote state (lexer.md §7.1 rule 4): a `(` or `)` inside an open single-quote, double-quote, or backtick region of the body — or backslash-escaped — does not count. The scan operates on runes:
+The `$()` syntax requires balanced parentheses. The count uses the BODY's own quote state (lexer.md §7.1 rule 4). A `(` or `)` does not count when it sits inside an open single-quote, double-quote, or backtick region of the body. A backslash-escaped one does not count either. The scan operates on runes:
 
-```go
-// Quote-state aware: parens inside quoted body regions and escaped
-// parens are skipped (lexer.md §7.1 rule 4)
-func findMatchingParen(runes []rune, startIdx int) int {
-    depth := 1
-    for i := startIdx; i < len(runes); i++ {
-        // ... skip escaped runes and track the body's quote depths ...
-        switch runes[i] {
-        case '(':
-            depth++
-        case ')':
-            depth--
-            if depth == 0 {
-                return i
-            }
-        }
-    }
-    return -1  // Not found
-}
+```
+FIND_MATCHING_PAREN(runes, start) -> index or NONE
+    # Quote-state aware. A paren inside a quoted body region, and an
+    # escaped paren, are both skipped (lexer.md §7.1 rule 4).
+
+    depth = 1
+    for i from start to the last rune:
+        skip an escaped rune, and track the body's own quote depths
+        if runes[i] == ( :  depth = depth + 1
+        if runes[i] == ) :  depth = depth - 1
+                            if depth == 0: return i
+    return NONE
 ```
 
 This is what makes `echo $(echo ")")` valid: the quoted `)` is body content, not a closing delimiter (§10.1 rule 8).
@@ -907,51 +849,28 @@ The canonical error-string table lives in diagnostics.md §5. The quote-related 
 
 The lexer reports the same strings for the same conditions (lexer.md §9).
 
-### 11.2 Error Detection Code
+### 11.2 Error Detection
 
-```go
-// Check for unclosed quotes
-if singleQuoteDepth%2 != 0 {
-    a.errors = append(a.errors, SyntaxError{
-        Start:   start,
-        End:     a.pos,
-        Message: "unclosed single quote",
-    })
-}
-if doubleQuoteDepth%2 != 0 {
-    a.errors = append(a.errors, SyntaxError{
-        Start:   start,
-        End:     a.pos,
-        Message: "unclosed double quote",
-    })
-}
-if backtickDepth%2 != 0 {
-    a.errors = append(a.errors, SyntaxError{
-        Start:   start,
-        End:     a.pos,
-        Message: "unclosed backtick",
-    })
-}
-if parenDepth > 0 {
-    a.errors = append(a.errors, SyntaxError{
-        Start:   start,
-        End:     a.pos,
-        Message: "unclosed command substitution $(...)",
-    })
-}
+At end of input the scanner examines each counter in turn. A counter that is still open contributes one error. That error carries the canonical string of §11.1. Its span runs from the region's recorded open position to the end of the input:
+
 ```
+for each counter that is still open:
+    REPORT(start = the recorded open position,
+           end   = end of input,
+           message = the canonical string for that counter)
+```
+
+The counters are examined innermost first. The report therefore reads outward from the deepest unclosed region.
 
 ### 11.3 Error Position Tracking
 
-Errors include position information for accurate error reporting (positions are rune indices):
+Every reported error carries a position. A caret diagnostic points at that position (diagnostics.md):
 
-```go
-type SyntaxError struct {
-    Start   int    // Rune position (0-indexed)
-    End     int    // Rune position (exclusive)
-    Message string
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Start` | The first rune of the span, counted from 0 |
+| `End` | One past the last rune of the span |
+| `Message` | The canonical error string (§11.1) |
 
 ---
 
@@ -1078,11 +997,11 @@ Tokens: [echo, a 'b' c, d]
 
 ## 13. Differences from POSIX Shells
 
-Quoting is where Foundation Shell most visibly diverges from POSIX. The divergences are deliberate; this section is the honest inventory. (See also the warning at the top of this file, and lexer.md §13 for tokenization-level differences.)
+Quoting is where Foundation Shell most visibly diverges from POSIX. The divergences are deliberate. This section is the honest inventory. (See also the warning at the top of this file, and lexer.md §13 for tokenization-level differences.)
 
 ### 13.1 The Nesting Rule (Flagship)
 
-POSIX quote characters strictly toggle: the first `'` opens, the next `'` ALWAYS closes. Foundation Shell instead applies the open/nest/close rule (§5.2): a same-type quote character inside an open region NESTS when it is whitespace-preceded and followed by a non-whitespace, non-quote rune.
+POSIX quote characters strictly toggle. The first `'` opens, and the next `'` ALWAYS closes. Foundation Shell applies the open/nest/close rule instead (§5.2). A same-type quote character inside an open region NESTS when whitespace precedes it and a non-whitespace, non-quote rune follows it.
 
 What it buys:
 
@@ -1098,7 +1017,7 @@ echo 'a 'b' c' 'd'
 # Foundation Shell: args = [a 'b' c, d]   (outer pair + nested pair, §6.1)
 ```
 
-Both shells accept this input; they disagree about what it means. The divergence is self-announcing: whenever the nesting reading wins, the interior quote characters remain visibly in the argument (§5.2 rule 3) — output never silently *loses* structure relative to POSIX; it visibly keeps quotes POSIX would have consumed. The same goes for expansions: content POSIX would have expanded outside quotes (the `$X` in `'a '$X' c'`) stays literal here, wrapped in visible quotes.
+Both shells accept this input. They disagree about what it means. The divergence is self-announcing. Whenever the nesting reading wins, the interior quote characters stay visibly in the argument (§5.2 rule 3). The output never silently *loses* structure against POSIX. It visibly keeps the quotes POSIX consumes. Expansion behaves the same way. POSIX expands the `$X` in `'a '$X' c'`, because that `$X` falls outside its quotes. Here it stays literal, wrapped in visible quotes.
 
 ### 13.3 The Costs: Valid POSIX Inputs That Are Errors Here
 
@@ -1111,11 +1030,11 @@ When the rule reads "nest" but the input never brings the depth back to 0, Found
 | `echo "Total: "$N` | `Total: ` + value of `$N` | error: `unclosed double quote` | `echo "Total: $N"` |
 | `echo "count: "$(date)` | `count: ` + date output | error: `unclosed double quote` | `echo "count: $(date)"` |
 
-In each row the quote character before the trailing text is whitespace-preceded and followed by ordinary text, so it NESTS (§5.2); depth ends above 0 and the input fails with the canonical unclosed error (§5.5). The rewrite is always the simpler one-region form — the close-then-concatenate idiom is unnecessary here because expansions already run inside double quotes.
+In each row, whitespace precedes the quote character before the trailing text, and ordinary text follows it. That character therefore NESTS (§5.2). Depth ends above 0, and the input fails with the canonical unclosed error (§5.5). The rewrite is always the simpler one-region form. The close-then-concatenate idiom buys nothing here, because expansions already run inside double quotes.
 
 ### 13.4 POSIX-Identical Anchors
 
-The neighbor conditions deliberately reduce to POSIX behavior for the common patterns: `'a' 'b'`, `'a'b`, `'a''b'`, `''`, `' '`, `'don'\''t'`, `"say \"hi\""`, and interleaves like §12.6's `echo "Hello, "'"'"$USER"'"'"!"` all tokenize exactly as POSIX tokenizes them (§6.1.1).
+The neighbor conditions deliberately reduce to POSIX behavior for the common patterns. Each of `'a' 'b'`, `'a'b`, `'a''b'`, `''`, `' '`, `'don'\''t'`, and `"say \"hi\""` tokenizes exactly as POSIX tokenizes it (§6.1.1). So does an interleave such as §12.6's `echo "Hello, "'"'"$USER"'"'"!"`.
 
 ### 13.5 Other Deliberate Divergences
 
@@ -1131,89 +1050,55 @@ The neighbor conditions deliberately reduce to POSIX behavior for the common pat
 | `\` at EOL in double quotes | Line continuation | Not supported |
 | U+0001 in input | Ordinary data | Reserved internal byte; behavior undefined (lexer.md §5.1.4) |
 
-Unchanged by design (POSIX-identical, stated to prevent doubt): empty quoted strings produce empty arguments (lexer.md §4.5); quoting or escaping an operator character makes it literal, and operators are recognized only outside quotes and substitutions (lexer.md §3.3.4).
+Two behaviors are POSIX-identical by design. They are stated here to prevent doubt. First, an empty quoted string produces an empty argument (lexer.md §4.5). Second, quoting or escaping an operator character makes it literal, and operators are recognized only outside quotes and substitutions (lexer.md §3.3.4).
 
 ---
 
-## 14. Implementation Reference
+## 14. Vocabulary Reference
 
-### 14.1 Key Source Files
+This section gathers the names this file uses. Each one is defined where its owning file says (README, authority map).
 
-Paths are relative to the foundation-shell repository root:
+### 14.1 Operations
 
-| File | Purpose |
-|------|---------|
-| `src/internal/syntax/analyzer.go` | Syntax analysis, depth tracking, error detection |
-| `src/internal/lexer/lexer.go` | Tokenization, escape processing, quote removal |
-| `src/internal/expander/expander.go` | Variable/command expansion |
-| `src/pkg/parser/parser.go` | Command chain construction |
+| Operation | Yields | Canonical in |
+|-----------|--------|--------------|
+| Scan | One pass over the input, producing the tokens both views project from (§1.3) | lexer.md |
+| Analyze | The analysis result: analyzed tokens, the errors, and a validity flag | highlighting.md |
+| Tokenize | The execution view: `TokenContext` values, or the first error | lexer.md |
+| Expand tilde | The token with a leading `~` resolved | expansion.md |
+| Expand variables | The token with `$NAME`, `${NAME}`, and `$?` resolved | expansion.md |
+| Expand command substitution | The token with `$(...)` and backtick bodies replaced by their output | expansion.md |
+| Strip escape markers | The value with every remaining marker rune removed (§7.2) | lexer.md |
 
-### 14.2 Key Functions
+The component that runs a substitution body is the substitution executor (expansion.md). It is deliberately not called a subshell. That term is reserved for the future `()` grouping construct.
 
-```go
-// Syntax Analysis
-func Analyze(input string) *AnalysisResult
+### 14.2 Constants
 
-// Tokenization
-func Tokenize(input string) ([]TokenContext, error)
+| Name | Value | Purpose |
+|------|-------|---------|
+| Escape marker | U+0001 | Marks an escaped `$` or backtick between the lexer and the expander (§7.1) |
 
-// Expansion (pipeline and suppression flags: expansion.md §Expansion Order)
-func ExpandTilde(token string) string
-func ExpandEnvironment(token string, lastStatus int) string
-func ExpandCommandSubstitution(token string, executor SubstitutionExecutor) (string, error)
+### 14.3 Data
 
-// Utilities
-func StripEscapeMarkers(s string) string
-```
-
-(`SubstitutionExecutor` is the renamed `SubshellExecutor` — see expansion.md; "subshell" is reserved for future `()` grouping.)
-
-### 14.3 Key Constants
-
-```go
-const EscapeMarker = '\x01'  // Marks escaped dollar signs and backticks
-```
-
-### 14.4 Key Data Structures
-
-```go
-// Lexer output
-type TokenContext struct {
-    Content         string
-    WasSingleQuoted bool
-    WasQuoted       bool
-    IsOperator      bool
-}
-
-// Analyzer output
-type AnalyzedToken struct {
-    Type  SemanticType
-    Value string
-    Start int
-    End   int
-    Depth int
-}
-
-type SyntaxError struct {
-    Start   int
-    End     int
-    Message string
-}
-```
+| Name | Fields | Defined in |
+|------|--------|------------|
+| `TokenContext` | `Content`, `WasSingleQuoted`, `WasQuoted`, `IsOperator` | §2.4 |
+| `AnalyzedToken` | `Type`, `Value`, `Start`, `End`, `Depth` | §9.3 |
+| Reported error | `Start`, `End`, `Message` | §11.3 |
 
 ---
 
-## 15. Testing Considerations
+## 15. Conformance Cases
 
-### 15.1 Critical Test Cases
+### 15.1 Required Cases
 
-1. **Nesting decisions (§5.2)**: open at depth 0; each neighbor condition (a)–(c) individually flips NEST to CLOSE; even-count unclosed inputs (`'a 'b`); odd counts always unclosed
+1. **Nesting decisions (§5.2)**: an open at depth 0. Each neighbor condition (a)–(c) flipping NEST to CLOSE on its own. An even-count unclosed input, such as `'a 'b`. An odd count, which is always unclosed
 2. **Quote isolation**: Verify different-type quotes inside open regions are literal (§5.3)
 3. **Escape processing**: Test all escape sequences in all contexts
 4. **Concatenation**: Test adjacent quoted segments
 5. **Empty strings**: Test that `""` and `''` produce empty tokens
 6. **Nested structures**: Test deeply nested quotes and substitutions
-7. **Substitution bodies**: Quotes/escapes inside `$()`/backticks preserved verbatim; quoted `)` does not close
+7. **Substitution bodies**: quotes and escapes inside `$()` and backticks stay verbatim. A quoted `)` does not close the body
 8. **WasSingleQuoted/WasQuoted propagation**: Verify conservative flag behavior and per-boundary reset
 9. **Error messages**: Verify canonical strings (diagnostics.md §5) and positions
 10. **Lexer/analyzer agreement**: The two scanners accept exactly the same inputs (highlighting.md §7.1)
@@ -1250,8 +1135,8 @@ Foundation Shell's quoting system provides:
 2. **Double quotes** for whitespace preservation with expansion
 3. **Backticks and $()** for command substitution
 4. **Escape sequences** for character-level control
-5. **Depth-tracked nesting** (§5, §6) — same-type quotes can nest; the flagship non-POSIX feature
-6. **Quote removal** during tokenization (outermost pairs only; nested quotes and substitution bodies preserved)
+5. **Depth-tracked nesting** (§5, §6). Same-type quotes can nest. This is the flagship non-POSIX feature
+6. **Quote removal** during tokenization, on the outermost pairs only. Nested quotes and substitution bodies stay
 7. **WasSingleQuoted / WasQuoted flags** for expansion control
 
 The system prioritizes:
