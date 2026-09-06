@@ -14,21 +14,19 @@ This document is the exhaustive specification for Foundation Shell's diagnostic 
 
 ## 1. Overview of Diagnostic System
 
-The diagnostic system provides human-readable error output for syntax errors detected during shell input analysis. It is implemented in the `syntax` package and consists of:
+The diagnostic system provides human-readable error output for the syntax errors that analysis detects. It has these parts:
 
-1. **SyntaxError** - A struct containing error position and message
-2. **FormatDiagnostics** - Formats errors for display to users
-3. **FormatDiagnosticsFromResult** - Convenience wrapper for AnalysisResult
+1. **The syntax error** - a record that carries an error's position and its message
+2. **Format diagnostics** - it formats errors for display to the user
+3. **Format diagnostics from a result** - the same, taken straight from an analysis result
 
-### 1.1 SyntaxError Structure
+### 1.1 The Syntax Error Record
 
-```go
-type SyntaxError struct {
-    Start   int    // Start position (0-indexed, inclusive)
-    End     int    // End position (0-indexed, exclusive)
-    Message string // Human-readable error message
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Start` | Start position, counted from 0, inclusive |
+| `End` | End position, counted from 0, exclusive |
+| `Message` | The human-readable error message (§5) |
 
 ### 1.2 Core Principle
 
@@ -537,7 +535,7 @@ error: unclosed command substitution $(...)
 
 When input is empty but an error is provided:
 - Line 1 will be empty
-- Line 2 may contain carets (implementation-dependent for edge positions)
+- Line 2 may contain carets. This specification does not fix their placement for an edge position
 - Line 3 contains the error message
 
 ### 9.2 Error Position Beyond Input
@@ -582,48 +580,40 @@ Tab characters in input:
 ### 9.8 No Errors
 
 When the error slice is empty or nil:
-- `FormatDiagnostics` returns an empty string (`""`)
+- Formatting yields the empty string (`""`)
 - No output is produced
 
 ---
 
-## 10. API Reference
+## 10. Interface Reference
 
-### 10.1 FormatDiagnostics
+### 10.1 Format Diagnostics
 
-```go
-func FormatDiagnostics(input string, errors []SyntaxError) string
-```
+**Takes:**
+- The original input string that was analyzed
+- The syntax errors, possibly none
 
-**Parameters:**
-- `input`: The original input string that was analyzed
-- `errors`: A slice of SyntaxError structs, or nil
-
-**Returns:**
-- Formatted diagnostic string, or empty string if no errors
+**Yields:**
+- The formatted diagnostic text, or the empty string when there are no errors
 
 **Behavior:**
-- Returns `""` if `errors` is nil or empty
-- Processes each error sequentially
-- Separates multiple error blocks with a blank line (§7.1)
+- Yields `""` when no error is given
+- Processes each error in turn
+- Separates one error block from the next with a blank line (§7.1)
 - Non-empty output ends with exactly one trailing newline
 
-### 10.2 FormatDiagnosticsFromResult
+### 10.2 Format Diagnostics From a Result
 
-```go
-func FormatDiagnosticsFromResult(result *AnalysisResult) string
-```
+**Takes:**
+- One analysis result (highlighting.md §2.1), possibly none
 
-**Parameters:**
-- `result`: An AnalysisResult from the Analyze function, or nil
-
-**Returns:**
-- Formatted diagnostic string, or empty string if no errors
+**Yields:**
+- The formatted diagnostic text, or the empty string when there are no errors
 
 **Behavior:**
-- Returns `""` if `result` is nil
-- Reconstructs input from tokens if needed
-- Delegates to FormatDiagnostics
+- Yields `""` when no result is given
+- Reconstructs the input from the result's tokens when the input is not at hand
+- Otherwise behaves exactly as §10.1
 
 ---
 
@@ -631,7 +621,7 @@ func FormatDiagnosticsFromResult(result *AnalysisResult) string
 
 ### 11.1 Error Generation
 
-The `Analyze` function populates the `Errors` slice in `AnalysisResult` with `SyntaxError` structs. Error detection occurs:
+Analysis fills the `Errors` field of its result (highlighting.md §2.1) with syntax error records. Detection occurs at two points:
 
 1. **During token parsing**: Unclosed quotes, backticks, and command substitutions
 2. **After parsing completes**: Trailing operators and missing redirection targets
@@ -645,15 +635,15 @@ Error positions correspond to:
 ### 11.3 Valid Input
 
 For valid input:
-- `AnalysisResult.Valid == true`
-- `AnalysisResult.Errors` is an empty slice
-- `FormatDiagnostics` returns `""`
+- The result's `Valid` field is true
+- The result's `Errors` field is empty
+- Formatting yields `""`
 
 ---
 
-## 12. Test Validation Requirements
+## 12. Conformance Requirements
 
-Tests validating against this specification MUST:
+A conformance suite that validates against this specification MUST:
 
 1. Match error messages exactly (case-sensitive) against the canonical table (§5)
 2. Verify caret count equals `End - Start` (minimum 1)
@@ -662,56 +652,26 @@ Tests validating against this specification MUST:
 5. Verify blank-line separation between multiple error blocks and the single trailing newline (§7.1)
 6. Handle edge cases per Section 9
 
-### 12.1 Test Template
+### 12.1 Case Template
 
-~~~go
-func TestDiagnostic_ErrorName(t *testing.T) {
-    input := `<input with error>`
-    result := Analyze(input)
+Each case takes one input and the error it must produce. The checks are:
 
-    // Verify error detected
-    if result.Valid {
-        t.Fatal("expected invalid result")
-    }
+~~~
+input  = <input with error>
+result = ANALYZE(input)
 
-    // Verify error message
-    found := false
-    for _, err := range result.Errors {
-        if err.Message == "<exact message>" {
-            found = true
-            // Verify positions
-            if err.Start != <expected_start> {
-                t.Errorf("wrong start position")
-            }
-            if err.End != <expected_end> {
-                t.Errorf("wrong end position")
-            }
-        }
-    }
-    if !found {
-        t.Errorf("expected error message not found")
-    }
+ASSERT result.Valid is false
 
-    // Verify formatted output
-    output := FormatDiagnostics(input, result.Errors)
+ASSERT some error e in result.Errors has:
+    e.Message == "<exact message>"
+    e.Start   == <expected start>
+    e.End     == <expected end>
 
-    // Check contains input line
-    if !strings.Contains(output, input) {
-        t.Error("missing input line")
-    }
+output = FORMAT_DIAGNOSTICS(input, result.Errors)
 
-    // Check caret count
-    caretCount := strings.Count(output, "^")
-    expectedCarets := <expected_end> - <expected_start>
-    if caretCount != expectedCarets {
-        t.Errorf("expected %d carets, got %d", expectedCarets, caretCount)
-    }
-
-    // Check error message present
-    if !strings.Contains(output, "error: <exact message>") {
-        t.Error("missing error message")
-    }
-}
+ASSERT output contains the input line
+ASSERT output contains exactly (<expected end> - <expected start>) carets
+ASSERT output contains "error: <exact message>"
 ~~~
 
 ---
@@ -720,7 +680,7 @@ func TestDiagnostic_ErrorName(t *testing.T) {
 
 | Condition | Message | Typical Start | Typical End |
 |-----------|---------|---------------|-------------|
-| Leading chain operator | `unexpected operator at start: <op>` | Operator position | Operator position + len(op) |
+| Leading chain operator | `unexpected operator at start: <op>` | Operator position | Operator position + the operator's length |
 | Trailing `\|` | `unexpected operator at end` | Operator position | Operator position + 1 |
 | Trailing `&&` | `unexpected operator at end` | Operator position | Operator position + 2 |
 | Trailing `\|\|` | `unexpected operator at end` | Operator position | Operator position + 2 |

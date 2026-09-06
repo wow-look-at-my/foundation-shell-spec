@@ -51,67 +51,39 @@ Input String
 
 Represents a single command with its arguments and I/O configuration.
 
-```go
-type CommandSpec struct {
-    Args         []string  // Command name and arguments
-    InputFile    string    // Input redirection target (< file)
-    OutputFile   string    // Output redirection target (> or >> file)
-    ErrorFile    string    // Error redirection target (2> or 2>> file)
-    AppendOutput bool      // True if >> was used
-    AppendError  bool      // True if 2>> was used
-}
-```
-
 #### Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Args` | `[]string` | Command name at index 0, arguments at indices 1+ |
-| `InputFile` | `string` | Path for stdin redirection, empty if not redirected |
-| `OutputFile` | `string` | Path for stdout redirection, empty if not redirected |
-| `ErrorFile` | `string` | Path for stderr redirection, empty if not redirected |
-| `AppendOutput` | `bool` | `true` for `>>`, `false` for `>` |
-| `AppendError` | `bool` | `true` for `2>>`, `false` for `2>` |
+| `Args` | word list | Command name at index 0, arguments at indices 1 and up |
+| `InputFile` | path | Target of a `<` redirection. Empty when there is none |
+| `OutputFile` | path | Target of a `>` or `>>` redirection. Empty when there is none |
+| `ErrorFile` | path | Target of a `2>` or `2>>` redirection. Empty when there is none |
+| `AppendOutput` | flag | True for `>>`, false for `>` |
+| `AppendError` | flag | True for `2>>`, false for `2>` |
 
 ### Chain
 
 Represents a sequence of commands connected by operators.
 
-```go
-type Chain struct {
-    Commands  []*CommandSpec      // List of commands
-    Operators []token.TokenType   // Operators between commands
-}
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `Commands` | command list | The commands, in input order |
+| `Operators` | operator list | The operators between them |
 
 #### Invariant
 
-```
-len(Operators) == len(Commands) - 1
-```
+For N commands there are exactly N−1 operators connecting them.
 
-For N commands, there are exactly N-1 operators connecting them.
+### The Classified Token
 
-### classifiedToken
-
-Internal representation after expansion and classification.
-
-```go
-type classifiedToken struct {
-    tokenType token.TokenType
-    value     string
-}
-```
+The intermediate form, after expansion and classification. It carries a token type and a value.
 
 ## Parsing Pipeline
 
 ### Step 1: Tokenization
 
-The lexer tokenizes the input into `TokenContext` structures:
-
-```go
-tokenContexts, err := lexer.Tokenize(input)
-```
+The lexer tokenizes the input into `TokenContext` values (lexer.md §2.1).
 
 If tokenization fails, return an error:
 ```
@@ -240,7 +212,7 @@ A trailing `;` is VALID. The parser CONSUMES it: it does not appear in `Chain.Op
 Input:  "echo hi ;"
 Output: Chain{
     Commands: [
-        &CommandSpec{Args: ["echo", "hi"]}
+        CommandSpec{Args: ["echo", "hi"]}
     ],
     Operators: []
 }
@@ -291,40 +263,36 @@ Redirection operators modify I/O streams.
 
 Operator detection applies ONLY to tokens the lexer marked `IsOperator: true` (see Step 2 above). For those tokens, the content-to-type mapping is:
 
-```go
-// Called only for tokens with IsOperator == true
-func parseOperator(s string) (token.TokenType, bool) {
-    switch s {
-    case "|":  return token.Pipe, true
-    case "&&": return token.And, true
-    case "||": return token.Or, true
-    case ";":  return token.Semicolon, true
-    case "<":  return token.RedirectStdIn, true
-    case ">":  return token.RedirectStdOut, true
-    case ">>": return token.RedirectStdOutAppend, true
-    case "2>": return token.RedirectStdErr, true
-    case "2>>": return token.RedirectStdErrAppend, true
-    default:   return 0, false
-    }
-}
-```
+| Content | Token type |
+|---------|------------|
+| `\|` | `Pipe` |
+| `&&` | `And` |
+| `\|\|` | `Or` |
+| `;` | `Semicolon` |
+| `<` | `RedirectStdIn` |
+| `>` | `RedirectStdOut` |
+| `>>` | `RedirectStdOutAppend` |
+| `2>` | `RedirectStdErr` |
+| `2>>` | `RedirectStdErrAppend` |
+
+No other content maps to an operator type. A token marked as an operator whose content is absent from this table is an internal failure, never a word.
 
 ## Error Handling
 
 ### Defined Errors
 
-```go
-var (
-    ErrEmptyInput               = errors.New("empty input")
-    ErrOperatorAtStart          = errors.New("unexpected operator at start")
-    ErrMissingRedirectionTarget = errors.New("missing redirection target")
-    ErrTrailingOperator         = errors.New("unexpected operator at end")
-    ErrConsecutiveOperators     = errors.New("consecutive operators")
-    ErrEmptyCommand             = errors.New("empty command")
-    ErrEmptyRedirectionTarget   = errors.New("empty redirection target")
-    ErrFdDuplicationUnsupported = errors.New("file descriptor duplication is not supported")
-)
-```
+| Name | Message |
+|------|---------|
+| `ErrEmptyInput` | `empty input` |
+| `ErrOperatorAtStart` | `unexpected operator at start` |
+| `ErrMissingRedirectionTarget` | `missing redirection target` |
+| `ErrTrailingOperator` | `unexpected operator at end` |
+| `ErrConsecutiveOperators` | `consecutive operators` |
+| `ErrEmptyCommand` | `empty command` |
+| `ErrEmptyRedirectionTarget` | `empty redirection target` |
+| `ErrFdDuplicationUnsupported` | `file descriptor duplication is not supported` |
+
+The canonical strings, with their placeholder suffixes, are in diagnostics.md §5.
 
 ### Error Format
 
@@ -360,33 +328,22 @@ Input: "echo > |"
 Error: missing redirection target: > followed by operator |
 ```
 
-## Public API
+## Public Interface
 
-### Parse
+A parse takes the input string, and optionally a substitution executor (expansion.md §Executor Interface). It yields a chain, or one error.
 
-```go
-func Parse(input string) (*Chain, error)
-```
+### Parsing Without an Executor
 
-Parses input without command substitution expansion.
+- `$(...)` and backticks stay as literal text
+- This form suits syntax validation and any parse that must not run a command
 
-- Equivalent to `ParseWithExecutor(input, nil)`
-- `$(...)` and backticks are preserved as literal text
-- Suitable for syntax validation and non-interactive parsing
+### Parsing With an Executor
 
-### ParseWithExecutor
+- `$(...)` and backticks expand during the parse
+- The executor runs the body in the shell's own process, never in an external shell (execution.md §Command Substitution Executor)
+- The interactive shell always parses this way
 
-```go
-func ParseWithExecutor(input string, executor expander.SubstitutionExecutor) (*Chain, error)
-```
-
-(`SubstitutionExecutor` is the renamed `SubshellExecutor`; "subshell" is reserved for future `()` grouping.)
-
-Parses input with optional command substitution expansion.
-
-- If `executor` is non-nil, `$(...)` and backticks are expanded
-- Executor runs in the same process (not external shell)
-- Used by the interactive shell with chain.Executor
+The name is deliberate. "Subshell" is reserved for the future `()` grouping construct.
 
 ## Examples
 
@@ -396,7 +353,7 @@ Parses input with optional command substitution expansion.
 Input:  "echo hello world"
 Output: Chain{
     Commands: [
-        &CommandSpec{Args: ["echo", "hello", "world"]}
+        CommandSpec{Args: ["echo", "hello", "world"]}
     ],
     Operators: []
 }
@@ -408,9 +365,9 @@ Output: Chain{
 Input:  "cat file.txt | grep pattern | wc -l"
 Output: Chain{
     Commands: [
-        &CommandSpec{Args: ["cat", "file.txt"]},
-        &CommandSpec{Args: ["grep", "pattern"]},
-        &CommandSpec{Args: ["wc", "-l"]}
+        CommandSpec{Args: ["cat", "file.txt"]},
+        CommandSpec{Args: ["grep", "pattern"]},
+        CommandSpec{Args: ["wc", "-l"]}
     ],
     Operators: [Pipe, Pipe]
 }
@@ -422,8 +379,8 @@ Output: Chain{
 Input:  "make && make test"
 Output: Chain{
     Commands: [
-        &CommandSpec{Args: ["make"]},
-        &CommandSpec{Args: ["make", "test"]}
+        CommandSpec{Args: ["make"]},
+        CommandSpec{Args: ["make", "test"]}
     ],
     Operators: [And]
 }
@@ -435,7 +392,7 @@ Output: Chain{
 Input:  "cat < input.txt > output.txt 2>> errors.log"
 Output: Chain{
     Commands: [
-        &CommandSpec{
+        CommandSpec{
             Args: ["cat"],
             InputFile: "input.txt",
             OutputFile: "output.txt",
@@ -464,7 +421,7 @@ Output: Chain{
 Input:  "echo $HOME"
 Output: Chain{
     Commands: [
-        &CommandSpec{Args: ["echo", "/home/user"]}  // Expanded
+        CommandSpec{Args: ["echo", "/home/user"]}  // Expanded
     ],
     Operators: []
 }
@@ -476,7 +433,7 @@ Output: Chain{
 Input:  "echo '$HOME'"
 Output: Chain{
     Commands: [
-        &CommandSpec{Args: ["echo", "$HOME"]}  // Literal
+        CommandSpec{Args: ["echo", "$HOME"]}  // Literal
     ],
     Operators: []
 }
@@ -555,7 +512,7 @@ word        := any value token (lexer.md §2.3)
 
 Every command contains at least one word — the grammar itself excludes redirection-only commands (`> file`), which the validator reports as `ErrEmptyCommand`. The optional final `;` is the consumed trailing semicolon. `word` is a lexer value token (a `TokenContext` with `IsOperator: false`); there is no separate quoted-string token type — quoting is resolved by the lexer before classification.
 
-## Testing Considerations
+## Conformance Cases
 
 ### Valid Inputs
 

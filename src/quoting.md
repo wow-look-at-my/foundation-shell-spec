@@ -12,7 +12,7 @@ recommend_after: parser.md
 
 ## 1. Overview
 
-Foundation Shell implements a quoting system that controls how text is interpreted, whether expansions occur, and how special characters are treated.
+Foundation Shell defines a quoting system that controls how text is interpreted, whether expansions occur, and how special characters are treated.
 
 ### 1.1 Quoting Mechanisms
 

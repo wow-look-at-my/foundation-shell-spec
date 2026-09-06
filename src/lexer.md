@@ -39,8 +39,8 @@ Input String
      |                  (execution view: whitespace and comments dropped,
      |                   newline materialized as ;)
      |
-     +--> [VALIDATE] --> Problem[]  (the structural rules, ONE implementation;
-     |                   the parser renders them as errors, the analyzer as
+     +--> [VALIDATE] --> Problem[]  (the structural rules, stated ONCE.
+     |                   The parser renders them as errors, the analyzer as
      |                   caret diagnostics — diagnostics.md §5.1 and §5.2)
      |
      +--> [ANALYZE] --> AnalyzedToken[] (highlighting.md: classification only)
@@ -56,14 +56,12 @@ Input String
 
 The lexer produces `TokenContext` structures, NOT the formal `Token` types. Token classification happens in the parser.
 
-```go
-type TokenContext struct {
-    Content         string  // The token's text content (escapes processed, quote delimiters removed)
-    WasSingleQuoted bool    // True if any part was inside single quotes
-    WasQuoted       bool    // True if any part was inside any quotes (single or double)
-    IsOperator      bool    // True if the lexer recognized this token as an operator
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Content` | The token's text content. Escapes are processed, and the outermost quote delimiters are removed |
+| `WasSingleQuoted` | True if any part was inside single quotes |
+| `WasQuoted` | True if any part was inside quotes of either type |
+| `IsOperator` | True if the lexer recognized this token as an operator |
 
 Downstream consumers of the flags:
 
@@ -121,7 +119,7 @@ Whitespace serves as a token separator, NOT a token itself. The lexer consumes w
 
 #### 3.1.1 Whitespace Characters
 
-The lexer uses Go's `unicode.IsSpace()` to identify whitespace, which includes:
+Whitespace is any rune with the Unicode White_Space property. That set includes:
 
 - Space (U+0020)
 - Horizontal tab (U+0009)
@@ -129,7 +127,7 @@ The lexer uses Go's `unicode.IsSpace()` to identify whitespace, which includes:
 - Vertical tab (U+000B)
 - Form feed (U+000C)
 - Carriage return (U+000D)
-- Various Unicode space characters
+- The other Unicode space characters, such as U+00A0 and U+2028
 
 Newline is special: at total depth 0 it not only separates words but also separates COMMANDS (§3.4). Every other whitespace character only separates words.
 
@@ -426,27 +424,21 @@ When `\$` or `` \` `` is encountered (outside single quotes and outside substitu
 
 #### 5.1.1 Escape Marker Constant
 
-```go
-const EscapeMarker = '\x01'  // ASCII Start of Heading
-```
+The escape marker is U+0001, the ASCII Start of Heading character.
 
 #### 5.1.2 Escape Marker Lifecycle
 
-1. **Lexer**: `\$VAR` becomes `\x01$VAR`; `` \`date\` `` becomes `` \x01`date\x01` ``
-2. **Expander**: Sees `\x01$` / `` \x01` ``, skips expansion, keeps the character literal
-3. **Post-expansion**: `StripEscapeMarkers()` removes any remaining `\x01` characters
+1. **Lexer**: `\$VAR` becomes `\x01$VAR`. Likewise `` \`date\` `` becomes `` \x01`date\x01` ``
+2. **Expander**: it sees `\x01$` or `` \x01` ``, skips expansion, and keeps the character literal
+3. **Post-expansion**: marker stripping (§5.1.3) removes any remaining `\x01` characters
 
-#### 5.1.3 StripEscapeMarkers Function
+#### 5.1.3 Marker Stripping
 
-```go
-func StripEscapeMarkers(s string) string {
-    return strings.ReplaceAll(s, string(EscapeMarker), "")
-}
-```
+Marker stripping takes a string and removes every occurrence of the marker rune from it. It applies to every value token, unconditionally (§11.3).
 
 #### 5.1.4 Reserved Marker Byte (Known Limitation)
 
-U+0001 is reserved for internal use. `StripEscapeMarkers` removes EVERY U+0001 byte, and the expander treats `\x01$` / `` \x01` `` as escape markers regardless of origin. Input that itself contains a literal U+0001 character (typed via Ctrl-V Ctrl-A, or embedded in a script) therefore has **undefined behavior**. U+0001 is formally outside the supported input alphabet.
+U+0001 is reserved for internal use. Marker stripping removes EVERY U+0001 byte, and the expander treats `\x01$` / `` \x01` `` as escape markers regardless of origin. Input that itself contains a literal U+0001 character (typed via Ctrl-V Ctrl-A, or embedded in a script) therefore has **undefined behavior**. U+0001 is formally outside the supported input alphabet.
 
 ### 5.2 Escape Examples
 
@@ -641,17 +633,11 @@ echo `date           -> Error: unclosed backtick
 ### 9.2 Error Behavior
 
 When an error occurs:
-- The lexer returns `nil` for the token slice
+- The lexer yields NO tokens at all
 - The error message is exactly one of the canonical strings above
-- No partial results are returned
+- No partial result is returned
 
-```go
-tokens, err := Tokenize(input)
-if err != nil {
-    // err.Error() is one of the four canonical strings above
-    // tokens == nil
-}
-```
+A caller therefore sees either a complete token stream or one canonical error. It never sees both.
 
 ---
 
@@ -663,23 +649,23 @@ The lexer maintains these state variables:
 
 | Variable | Type | Purpose |
 |----------|------|---------|
-| `tokens` | `[]TokenContext` | Accumulated tokens |
-| `current` | `strings.Builder` | Current word being built |
-| `sawWord` | `bool` | A word exists since the last boundary (content appended OR a quote pair seen) |
-| `pendingNewline` | `bool` | A depth-0 newline was seen; a `;` operator token materializes before the next emitted token (§3.4) |
-| `wasSingleQuoted` | `bool` | Current word contains single-quoted content |
-| `wasQuoted` | `bool` | Current word contains quoted content (any quote type) |
-| `singleQuoteDepth` | `int` | Open single-quote regions in the CURRENT context (quoting.md §5.1) |
-| `doubleQuoteDepth` | `int` | Open double-quote regions in the CURRENT context |
-| `backtickDepth` | `int` | Open backtick substitutions in the CURRENT context |
-| `dollarParenDepth` | `int` | Open `$(` count |
+| `tokens` | token list | Accumulated tokens |
+| `current` | text buffer | Current word being built |
+| `sawWord` | flag | A word exists since the last boundary. Either content was appended, or a quote pair was seen |
+| `pendingNewline` | flag | A depth-0 newline was seen. A `;` operator token materializes before the next emitted token (§3.4) |
+| `wasSingleQuoted` | flag | Current word contains single-quoted content |
+| `wasQuoted` | flag | Current word contains quoted content of any type |
+| `singleQuoteDepth` | counter | Open single-quote regions in the CURRENT context (quoting.md §5.1) |
+| `doubleQuoteDepth` | counter | Open double-quote regions in the CURRENT context |
+| `backtickDepth` | counter | Open backtick substitutions in the CURRENT context |
+| `dollarParenDepth` | counter | Open `$(` count |
 | `contextStack` | stack | Saved `{singleQuoteDepth, doubleQuoteDepth, backtickDepth}` per substitution level (§7.1 rule 4) |
 
-The three quote depths follow the open/nest/close rule (quoting.md §5.2, exposed below as `quoteAction`). Depth 0 means "no region of that type open in this context"; a toggle model's booleans correspond to depth 0 vs. depth ≥ 1.
+The quote depths follow the open/nest/close rule (quoting.md §5.2, written below as `QUOTE_ACTION`). Depth 0 means no region of that type is open in this context. A toggle model's flags correspond to depth 0 against depth 1 or more.
 
 ### 10.2 Processing Loop
 
-The quote branches call `quoteAction(input, i, depth)` — the shared open/nest/close decision of quoting.md §5.2.2.
+The quote branches call `QUOTE_ACTION(input, i, depth)`, which is the shared open/nest/close decision of quoting.md §5.2.2.
 
 Every token emission — in the loop and in the post-loop flush — goes through one helper that first materializes a pending newline separator (§3.4):
 
@@ -700,7 +686,7 @@ for each rune c at index i in input:
         if inBody: append '\\' and the next char verbatim (no conversion)
         else:      append the escape result (§5; \$ and \` gain the marker)
         skip next char; sawWord = true
-        continue                                  // the escaped char never reaches quoteAction
+        continue                                  # the escaped char never reaches QUOTE_ACTION
 
     if c == '$' AND next char == '(' AND singleQuoteDepth == 0:
         push {singleQuoteDepth, doubleQuoteDepth, backtickDepth}; zero all three
@@ -717,7 +703,7 @@ for each rune c at index i in input:
 
     if c == '`' AND singleQuoteDepth == 0:
         sawWord = true
-        switch quoteAction(input, i, backtickDepth):     // quoting.md §5.2.2
+        switch QUOTE_ACTION(input, i, backtickDepth):     // quoting.md §5.2.2
         case Open:                                        // depth 0 -> 1
             push {singleQuoteDepth, doubleQuoteDepth, backtickDepth}
             singleQuoteDepth = 0; doubleQuoteDepth = 0
@@ -732,7 +718,7 @@ for each rune c at index i in input:
 
     if c == '\'' AND doubleQuoteDepth == 0 AND backtickDepth == 0:
         sawWord = true
-        action := quoteAction(input, i, singleQuoteDepth)
+        action := QUOTE_ACTION(input, i, singleQuoteDepth)
         if action == Open OR action == Nest: singleQuoteDepth++
         else:                                singleQuoteDepth--
         if inBody:
@@ -746,7 +732,7 @@ for each rune c at index i in input:
 
     if c == '"' AND singleQuoteDepth == 0:
         sawWord = true
-        action := quoteAction(input, i, doubleQuoteDepth)
+        action := QUOTE_ACTION(input, i, doubleQuoteDepth)
         if action == Open OR action == Nest: doubleQuoteDepth++
         else:                                doubleQuoteDepth--
         if inBody:
@@ -830,26 +816,25 @@ The parser calls `lexer.Tokenize(input)` and receives `[]TokenContext`. It then:
 
 The quoting flags control expansion:
 
-```go
-if !tc.WasSingleQuoted {
-    if !tc.WasQuoted {
-        expandedValue = expander.ExpandTilde(expandedValue)
-    }
-    expandedValue = expander.ExpandEnvironment(expandedValue)
-    // ... command substitution if executor provided
-}
-// Marker stripping happens AFTER this block, for every value token (§11.3)
+```
+if not tc.WasSingleQuoted:
+    if not tc.WasQuoted:
+        value = EXPAND_TILDE(value)
+    value = EXPAND_VARIABLES(value)
+    # command substitution follows, when an executor is available
+
+# Marker stripping happens AFTER this block, for every value token (§11.3)
 ```
 
 ### 11.3 Escape Marker Stripping
 
 After all expansions, escape markers are removed. Stripping is UNCONDITIONAL — it applies to every value token, including single-quoted tokens (a concatenation such as `'a'\$HOME` carries a marker inside a `WasSingleQuoted` token):
 
-```go
-expandedValue = lexer.StripEscapeMarkers(expandedValue)
+```
+value = STRIP_ESCAPE_MARKERS(value)
 ```
 
-This converts `\x01$VAR` to `$VAR` (literal dollar sign, not expanded).
+This converts `\x01$VAR` to `$VAR`. The dollar sign is literal, and nothing expands it.
 
 ---
 
@@ -962,53 +947,39 @@ Potential enhancements for the lexer:
 
 ---
 
-## 15. API Reference
+## 15. Interface Reference
 
-### 15.1 Tokenize Function
+### 15.1 Tokenization
 
-```go
-func Tokenize(input string) ([]TokenContext, error)
-```
+**Takes:**
+- The shell command string to tokenize
 
-**Parameters:**
-- `input`: The shell command string to tokenize
-
-**Returns:**
-- `[]TokenContext`: Slice of tokens with content, quoting metadata, and operator marking
-- `error`: Non-nil if an unclosed quote or unclosed command substitution is detected
+**Yields, exactly one of:**
+- The token stream, carrying each token's content, its quoting flags, and its operator marking
+- One canonical error, when an unclosed quote or an unclosed command substitution is detected
 
 **Behavior:**
-- Empty input returns `nil, nil` (no tokens, no error)
-- Whitespace-only input returns `nil, nil`
-- Unclosed quotes or substitutions return `nil, error` (canonical strings, §9)
+- Empty input yields no tokens and no error
+- Whitespace-only input yields no tokens and no error
+- An unclosed quote or substitution yields no tokens and one canonical error (§9)
 
-### 15.2 TokenContext Structure
+### 15.2 The TokenContext Record
 
-```go
-type TokenContext struct {
-    Content         string  // Token text (escapes processed, quote delimiters removed)
-    WasSingleQuoted bool    // True if any part was single-quoted
-    WasQuoted       bool    // True if any part was inside any quotes
-    IsOperator      bool    // True if the lexer recognized this token as an operator
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Content` | Token text. Escapes are processed, and the outermost quote delimiters are removed |
+| `WasSingleQuoted` | True if any part was single-quoted |
+| `WasQuoted` | True if any part was inside quotes of either type |
+| `IsOperator` | True if the lexer recognized this token as an operator |
 
-### 15.3 StripEscapeMarkers Function
+### 15.3 Marker Stripping
 
-```go
-func StripEscapeMarkers(s string) string
-```
+**Takes:**
+- A string that can contain escape markers (`\x01`)
 
-**Parameters:**
-- `s`: String potentially containing escape markers (`\x01`)
+**Yields:**
+- That string with every `\x01` character removed. See §5.1.4 for the reserved-byte caveat
 
-**Returns:**
-- String with all `\x01` characters removed (see §5.1.4 for the reserved-byte caveat)
+### 15.4 The Escape Marker
 
-### 15.4 EscapeMarker Constant
-
-```go
-const EscapeMarker = '\x01'  // ASCII SOH (Start of Heading)
-```
-
-Used to mark escaped dollar signs and escaped backticks that should not be expanded.
+The marker is U+0001, the ASCII Start of Heading character. It marks an escaped dollar sign or an escaped backtick, which nothing expands.

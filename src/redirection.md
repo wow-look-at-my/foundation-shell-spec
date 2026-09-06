@@ -739,7 +739,7 @@ echo "user data" > ~/$USER/data.txt
 
 ## 14. Differences from POSIX Shell
 
-Foundation Shell implements a subset of POSIX shell redirection. Notable omissions:
+Foundation Shell defines a subset of POSIX shell redirection. Notable omissions:
 
 | Feature | POSIX | Foundation Shell |
 |---------|-------|------------------|

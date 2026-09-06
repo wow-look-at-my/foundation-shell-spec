@@ -1,10 +1,10 @@
 # Foundation Shell Specification
 
-Foundation Shell is a shell built from scratch against a rigorous, exhaustive specification. **This repository is that specification — the authoritative source of truth for all shell behavior.** The implementation (Go) lives in [wow-look-at-my/foundation-shell](https://github.com/wow-look-at-my/foundation-shell); where implementation and spec disagree, the spec wins.
+Foundation Shell is a shell built from scratch against a rigorous, exhaustive specification. **This repository is that specification — the authoritative source of truth for all shell behavior.** The spec pages stand alone. They name no implementation, no source path, and no programming language. Where an implementation and this spec disagree, the spec wins.
 
 ## Flagship Feature: Depth-Tracked Quote Nesting
 
-Unlike every sh-family shell, where a same-type quote character always *closes* the open quote, Foundation Shell lets quote characters **nest**: `echo 'outer 'inner' end'` is one argument with a nested quoted region, tracked by per-type depth counters. It is a deliberate non-POSIX design — some valid POSIX inputs are errors here, and vice versa. The precise open/nest/close rule, the depth model, and the POSIX divergence table live in [src/quoting.md](src/quoting.md).
+In every sh-family shell a same-type quote character always *closes* the open quote. Foundation Shell lets quote characters **nest** instead. So `echo 'outer 'inner' end'` is one argument with a nested quoted region, tracked by per-type depth counters. The design is deliberately non-POSIX. Some valid POSIX inputs are errors here. Some inputs valid here are errors in POSIX. The precise open/nest/close rule, the depth model, and the POSIX divergence table live in [src/quoting.md](src/quoting.md).
 
 ## Published Documentation
 
@@ -38,16 +38,16 @@ Every topic has exactly one owning file. When files overlap, the owner listed he
 8. [src/highlighting.md](src/highlighting.md)
 9. [src/diagnostics.md](src/diagnostics.md)
 
-The order is encoded in each file's `recommend_after` frontmatter field; the generator derives the published reading order from it.
+The order is encoded in each file's `recommend_after` frontmatter field. The generator derives the published reading order from it.
 
 ## Architecture Note: Two Scanners, One Rule
 
 The spec deliberately defines **two scanners** over the same input language:
 
 - The **lexer** ([src/lexer.md](src/lexer.md)) is the execution tokenizer: it removes outermost quote delimiters, processes escapes, and emits the `TokenContext` values the parser and expander consume. It stops at the first error, because execution cannot proceed past one.
-- The **analyzer** ([src/highlighting.md](src/highlighting.md)) is the error-tolerant scanner behind syntax highlighting and diagnostics: it preserves quote characters, records positions and depths for every token, and keeps scanning after errors so the REPL can highlight and caret-annotate incomplete input as you type.
+- The **analyzer** ([src/highlighting.md](src/highlighting.md)) is the error-tolerant scanner behind syntax highlighting and diagnostics. It preserves quote characters, and it records positions and depths for every token. It keeps scanning after an error. The REPL can therefore highlight and caret-annotate incomplete input as you type.
 
-Both exist because their jobs pull in opposite directions — execution wants clean expanded tokens and fail-fast errors; highlighting wants raw text spans and maximal error recovery. They MUST implement the same rules: quoting.md §1.3 ("Two Scanners, One Rule") binds both to the same quote-state semantics, and highlighting.md §7.1 states the consistency promise — an input is valid to one scanner iff it is valid to the other. The implementation enforces this with a lexer/analyzer validity cross-check in its conformance suite (for every corpus input, `Tokenize` errors iff `Analyze().Valid` is false).
+Both exist because their jobs pull in opposite directions. Execution wants clean expanded tokens and fail-fast errors. Highlighting wants raw text spans and maximal error recovery. They MUST implement the same rules. Both are bound to the same quote-state semantics by quoting.md §1.3 ("Two Scanners, One Rule"). The consistency promise is stated in highlighting.md §7.1. An input is valid to one scanner if and only if it is valid to the other. That section also requires a conformance suite to cross-check the promise on every corpus input.
 
 ## Repository Layout
 
