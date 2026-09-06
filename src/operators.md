@@ -20,7 +20,7 @@ This document provides the exhaustive specification for Foundation Shell's chain
 6. [Operator Precedence and Associativity](#operator-precedence-and-associativity)
 7. [Combining Operators in Complex Chains](#combining-operators-in-complex-chains)
 8. [Error Cases](#error-cases)
-9. [Evaluation Model](#evaluation-model)
+9. [Implementation Notes](#implementation-notes)
 
 ---
 
@@ -624,20 +624,29 @@ An empty command line or whitespace-only input is an error (for parse operations
 
 ---
 
-## Evaluation Model
+## Implementation Notes
 
 ### Internal Representation
 
-The parser produces a chain (parser.md):
+The parser produces a `Chain` structure:
 
-| Field | Meaning |
-|-------|---------|
-| `Commands` | The commands, in input order |
-| `Operators` | The operators between them. A chain of N commands carries N−1 operators |
+```go
+type Chain struct {
+    Commands  []*CommandSpec   // List of commands
+    Operators []token.TokenType // Operators between commands (len = len(Commands) - 1)
+}
+```
 
-### Operator Names
+### Token Types
 
-This file names the operator tokens `Pipe` (`|`), `And` (`&&`), `Or` (`||`), and `Semicolon` (`;`). The lexer's recognition rules for them are canonical in lexer.md §3.3.
+```go
+const (
+    Pipe      TokenType // |
+    And       TokenType // &&
+    Or        TokenType // ||
+    Semicolon TokenType // ;
+)
+```
 
 ### Execution Algorithm
 
@@ -688,15 +697,15 @@ Result: no output, exit status 1
 Pipelines execute all commands concurrently (mechanics canonical in execution.md §Pipeline Execution):
 
 1. Create pipes between adjacent commands
-2. Start every command at the same time
+2. Launch all commands in goroutines
 3. Connect stdout[i] to stdin[i+1] via pipes
 4. When a command finishes, close BOTH of its pipe ends — an early-exiting consumer terminates its producer (`yes | head -1` must not hang)
 5. Wait for all commands to complete
 6. Return exit code of rightmost command
 
-### Concurrent Writes to Stderr
+### Thread Safety
 
-The pipeline's commands share one stderr. That stderr MUST serialize each write, so no two messages interleave.
+Stderr from concurrent pipeline commands is serialized through a synchronized writer, so no two messages interleave.
 
 ---
 

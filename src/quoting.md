@@ -128,14 +128,25 @@ These concatenate into a single token: `it's working`
 
 The lexer records whether any part of a token was single-quoted. The `WasSingleQuoted` flag in `TokenContext` carries that fact (lexer.md §2.1). Single-quoted content also sets the broader `WasQuoted` flag:
 
-| Field | Meaning |
-|-------|---------|
-| `Content` | The token text, with the outermost quote delimiters removed |
-| `WasSingleQuoted` | True if ANY part of the token was inside single quotes |
-| `WasQuoted` | True if ANY part of the token was inside quotes of any type |
-| `IsOperator` | True if the token is an operator rather than a word |
+```go
+type TokenContext struct {
+    Content         string
+    WasSingleQuoted bool  // True if ANY part was inside single quotes
+    WasQuoted       bool  // True if ANY part was inside any quotes
+    IsOperator      bool
+}
+```
 
-The expander reads `WasSingleQuoted` first. When it is true, the token passes through with no expansion of any kind. When it is false, the expansion pipeline runs (expansion.md §Expansion Order).
+This flag is used by the expander to suppress all expansions:
+
+```go
+func Expand(token string, wasSingleQuoted bool) string {
+    if wasSingleQuoted {
+        return token  // No expansion performed
+    }
+    // ... perform expansions
+}
+```
 
 ### 2.5 Conservative Single-Quote Propagation
 
@@ -336,38 +347,47 @@ At depth 0 the character always OPENS, whatever its neighbors.
 
 Rune-based pseudocode for the scanner. It records positions and keeps the text as written for the analysis view. In the same pass it builds the delimiter-stripped content for the execution view (lexer.md §10.2):
 
+```go
+type Action int
+
+const (
+    Open Action = iota
+    Nest
+    Close
+)
+
+// quoteAction decides what one unescaped, ACTIVE quote character at rune
+// index i does. depth is the current counter of that quote type in the
+// current context.
+func quoteAction(input []rune, i, depth int) Action {
+    if depth == 0 {
+        return Open // rule 1: depth 0 always opens
+    }
+    prevIsSpace := unicode.IsSpace(input[i-1]) // depth >= 1 implies i >= 1
+    nextExists := i+1 < len(input)
+    nextIsSpace := nextExists && unicode.IsSpace(input[i+1])
+    nextIsQuote := nextExists &&
+        (input[i+1] == '\'' || input[i+1] == '"' || input[i+1] == '`')
+    if prevIsSpace && nextExists && !nextIsSpace && !nextIsQuote {
+        return Nest // rule 2: depth+1; the character stays in the argument
+    }
+    return Close // rule 2: depth-1; region ends when depth returns to 0
+}
 ```
-QUOTE_ACTION(input, i, depth) -> OPEN | NEST | CLOSE
-    # input is a sequence of runes. i is the index of one unescaped,
-    # ACTIVE quote character. depth is the current counter of that
-    # quote type in the current context.
 
-    if depth == 0:
-        return OPEN                     # rule 1: depth 0 always opens
+Applying it. Single quotes are shown here. The other types are identical in shape:
 
-    prev_is_space = IS_SPACE(input[i-1])   # depth >= 1 implies i >= 1
-    next_exists   = i+1 < LENGTH(input)
-    next_is_space = next_exists and IS_SPACE(input[i+1])
-    next_is_quote = next_exists and input[i+1] in { ' , " , ` }
-
-    if prev_is_space and next_exists
-       and not next_is_space and not next_is_quote:
-        return NEST                     # rule 2: depth+1, character kept
-
-    return CLOSE                        # rule 2: depth-1, region ends at 0
-```
-
-`IS_SPACE` is the whitespace predicate of lexer.md §4.1. Applying the action (single quotes shown, and the other two types are identical in shape):
-
-```
-if c == ' and double_quote_depth == 0 and backtick_depth == 0:   # active? (§5.3)
-    action = QUOTE_ACTION(input, i, single_quote_depth)
-    if action is OPEN or NEST:
-        single_quote_depth = single_quote_depth + 1
-        PUSH(open_positions, i)   # region start, for unclosed-error spans
-    if action is CLOSE:
-        single_quote_depth = single_quote_depth - 1
-        POP(open_positions)
+```go
+if c == '\'' && doubleQuoteDepth == 0 && backtickDepth == 0 { // active? (§5.3)
+    switch quoteAction(input, i, singleQuoteDepth) {
+    case Open, Nest:
+        singleQuoteDepth++
+        openPos = append(openPos, i) // region starts, for unclosed-error spans
+    case Close:
+        singleQuoteDepth--
+        openPos = openPos[:len(openPos)-1]
+    }
+}
 ```
 
 The transition decides whether the character is emitted or stripped. The lexer strips only the outermost delimiters, which are an OPEN from 0 and a CLOSE to 0, outside any substitution body. It keeps every nested quote character in the token (lexer.md §10.2).
@@ -391,10 +411,9 @@ Within an open quote region, only SAME-TYPE quote characters are subject to the 
 
 The total depth is the sum of all four counters in the current context. Unquoted whitespace splits words **only at total depth 0**:
 
-```
-total_depth = single_quote_depth + double_quote_depth
-            + backtick_depth + paren_depth
-# whitespace is a word boundary if and only if total_depth == 0
+```go
+totalDepth := singleQuoteDepth + doubleQuoteDepth + backtickDepth + parenDepth
+// whitespace is a word boundary iff totalDepth == 0
 ```
 
 The same condition gates operator recognition (lexer.md §3.2, §10.2). Whitespace inside any open region — including nested levels — is content.
@@ -403,12 +422,20 @@ The same condition gates operator recognition (lexer.md §3.2, §10.2). Whitespa
 
 At end of input every counter must be 0. Any counter still positive reports the canonical error for its type (diagnostics.md §5):
 
-| Counter still positive | Reported error |
-|------------------------|----------------|
-| single_quote_depth | `unclosed single quote` |
-| double_quote_depth | `unclosed double quote` |
-| backtick_depth | `unclosed backtick` |
-| paren_depth | `unclosed command substitution $(...)` |
+```go
+if singleQuoteDepth > 0 {
+    errors = append(errors, "unclosed single quote")
+}
+if doubleQuoteDepth > 0 {
+    errors = append(errors, "unclosed double quote")
+}
+if backtickDepth > 0 {
+    errors = append(errors, "unclosed backtick")
+}
+if parenDepth > 0 {
+    errors = append(errors, "unclosed command substitution $(...)")
+}
+```
 
 Two consequences of the nesting rule, spelled out because they differ from parity-based models:
 
@@ -534,17 +561,19 @@ Each type nests only against itself. The depth counters are independent of each 
 
 `$(...)` nests by explicit delimiters — `$(` always opens, and a `)` at body depth 0 always closes (§5.1, lexer.md §7.1). The §5.2 neighbor rule is not involved:
 
-```
-# Opening $(
-if c == $ and single_quote_depth == 0 and next rune is ( :
-    paren_depth = paren_depth + 1
-    PUSH a fresh body quote context (§5.3)
+```go
+// Handle $( command substitution
+if c == '$' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) && a.input[a.pos+1] == '(' {
+    parenDepth++
+    // ... push a fresh body quote context (§5.3)
+}
 
-# Closing ) — only when no body quote region is open
-if c == ) and paren_depth > 0 and single_quote_depth == 0
-   and double_quote_depth == 0 and backtick_depth == 0:
-    paren_depth = paren_depth - 1
-    POP the body context
+// Handle closing ) — only when no body quote region is open
+if c == ')' && parenDepth > 0 &&
+    singleQuoteDepth == 0 && doubleQuoteDepth == 0 && backtickDepth == 0 {
+    parenDepth--
+    // ... pop the body context
+}
 ```
 
 Command substitutions can be arbitrarily nested:
@@ -568,11 +597,17 @@ Backslash escapes provide character-level quoting outside of single quotes.
 
 When `\$` (or `` \` ``) is processed, the lexer does not simply produce the bare character. Instead, it produces the sequence `\x01$` (escape marker + character):
 
-```
-ESCAPE_MARKER = U+0001   # ASCII SOH (Start of Heading)
+```go
+const EscapeMarker = '\x01'  // ASCII SOH (Start of Heading)
 
-on \$ :  emit ESCAPE_MARKER, then emit $    # blocks expansion
-on \` :  emit ESCAPE_MARKER, then emit `    # blocks command substitution
+case '$':
+    // \$ becomes marker + $ to prevent expansion
+    current.WriteRune(EscapeMarker)
+    current.WriteRune('$')
+case '`':
+    // \` becomes marker + ` to prevent command substitution
+    current.WriteRune(EscapeMarker)
+    current.WriteRune('`')
 ```
 
 U+0001 is a reserved internal byte. Input that contains a literal U+0001 has undefined behavior (lexer.md §5.1.4).
@@ -581,16 +616,19 @@ U+0001 is a reserved internal byte. Input that contains a literal U+0001 has und
 
 1. **Lexer stage**: `\$VAR` becomes `\x01$VAR` in token content
 2. **Expander stage**: Sees `\x01$`, recognizes escaped dollar, keeps `$VAR` literal
-3. **Post-expansion**: a final pass removes every remaining `\x01`, unconditionally, from every value token (lexer.md §11.3)
+3. **Post-expansion**: `StripEscapeMarkers()` removes remaining `\x01`, unconditionally, for every value token (lexer.md §11.3)
 
-```
-# In the expander
-if token[i] == \x01 and token[i+1] == $ :
-    emit a literal $
-    advance past both runes      # the marker itself is never emitted
+```go
+// In expander
+if i < len(token)-1 && token[i] == '\x01' && token[i+1] == '$' {
+    // Escaped dollar - write literal $ and skip the marker
+    result.WriteByte('$')
+    i += 2
+    continue
+}
 
-# Post-expansion cleanup, on every value token, single-quoted included
-expanded_value = STRIP_ESCAPE_MARKERS(expanded_value)
+// Post-expansion cleanup (every value token, single-quoted included)
+expandedValue = lexer.StripEscapeMarkers(expandedValue)
 ```
 
 ### 7.3 Escape Examples
@@ -627,13 +665,17 @@ Tokens: ["echo", "hello\\"]
 
 The scanner consumes an escape sequence as a unit BEFORE quote-state tracking sees it. An escaped quote character can therefore never open, nest, or close a region (§5.2 rule 5):
 
-```
-# Escape sequences, outside single-quote regions (single_quote_depth == 0)
-if c == \ and a next rune exists:
-    emit c, then emit that next rune
-    advance past both runes
-    # The escaped rune never reaches QUOTE_ACTION (§5.2.2).
-    # It can change no depth counter.
+```go
+// Handle escape sequences (outside single-quote regions: singleQuoteDepth == 0)
+if c == '\\' && singleQuoteDepth == 0 && a.pos+1 < len(a.input) {
+    next := a.input[a.pos+1]
+    // The escaped character never reaches quoteAction (§5.2.2):
+    // it cannot affect any depth counter.
+    builder.WriteRune(c)
+    builder.WriteRune(next)
+    a.pos += 2
+    continue
+}
 ```
 
 This keeps `\"` from touching double-quote depth, and `\'` / `` \` `` from touching theirs. The neighbor test stays unchanged in the other direction. As raw runes, a backslash and an already-processed delimiter each take part in conditions (a)–(c) like any other rune (§5.2 rule 4).
@@ -677,14 +719,14 @@ The lexer applies the §5.2 rule to each active quote character and emits or ski
 
 The syntax analyzer **preserves** quotes in token values for highlighting purposes:
 
-```
-# Analyzer token
+```go
+// Analyzer token
 {Type: TypeSingleQuotedString, Value: "'hello world'", ...}
-# Includes the quote characters
+# Includes quote characters
 
-# Lexer token
+// Lexer token
 {Content: "hello world", WasSingleQuoted: true, WasQuoted: true}
-# Excludes the quote characters
+# Excludes quote characters
 ```
 
 This difference exists because:
@@ -741,21 +783,27 @@ The syntax analyzer assigns semantic types for syntax highlighting (canonical li
 
 ### 9.2 Semantic Type Determination
 
-```
-WORD_TYPE(value, depths) -> SemanticType
-
-    # Errors come first: any counter left open makes the word an error.
-    if any counter in depths is non-zero:
+```go
+func (a *analyzer) determineWordType(value string, singleDepth, doubleDepth, backtickDepth, parenDepth int) SemanticType {
+    // Check for errors first
+    if singleDepth%2 != 0 || doubleDepth%2 != 0 || backtickDepth%2 != 0 || parenDepth > 0 {
         return TypeError
+    }
 
-    # Then the whole-word quote types. The word must open and close
-    # with ONE matching delimiter pair.
-    if value starts and ends with ' :  return TypeSingleQuotedString
-    if value starts and ends with " :  return TypeDoubleQuotedString
-    if value starts and ends with ` :  return TypeBacktick
-
-    # Otherwise the word falls through to the positional types
-    # (TypeCommand, TypeArgument) of highlighting.md §3.
+    // Check for quote types (when entire token is quoted)
+    if len(value) >= 2 {
+        if value[0] == '\'' && value[len(value)-1] == '\'' {
+            return TypeSingleQuotedString
+        }
+        if value[0] == '"' && value[len(value)-1] == '"' {
+            return TypeDoubleQuotedString
+        }
+        if value[0] == '`' && value[len(value)-1] == '`' {
+            return TypeBacktick
+        }
+    }
+    // ...
+}
 ```
 
 A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a string type — it falls through to `TypeArgument`/`TypeCommand`. The string types apply only when the whole word is wrapped in one matching pair (highlighting.md §4.5).
@@ -764,12 +812,15 @@ A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a st
 
 Each token includes depth information for nested structures:
 
-| Field | Meaning |
-|-------|---------|
-| `Type` | The semantic type (§9.1, highlighting.md §3) |
-| `Value` | The token text as written, quote characters included |
-| `Start`, `End` | The token's rune span in the input |
-| `Depth` | The maximum nesting level reached in this token (§5.4 high-water mark) |
+```go
+type AnalyzedToken struct {
+    Type  SemanticType
+    Value string
+    Start int
+    End   int
+    Depth int  // Max nesting level reached in this token (§5.4 high-water mark)
+}
+```
 
 `Depth` is the maximum nesting level reached within the token, across quote regions and command substitutions alike. It is the high-water mark of the total depth (§5.4) over the token's span. The canonical definition and its examples live in highlighting.md §9.4. A plain `'a'` has Depth 1. The token `'a 'b' c'` has Depth 2, and unquoted `foo` has Depth 0.
 
@@ -789,9 +840,9 @@ Command substitution:
 3. Removes trailing newlines
 4. Replaces the substitution with output
 
-```
-# Trim trailing newlines (standard shell behavior)
-output = REMOVE every trailing newline from output
+```go
+// Trim trailing newlines (standard shell behavior)
+output = strings.TrimRight(output, "\n")
 ```
 
 ### 10.3 Innermost-First Through Recursion
@@ -816,18 +867,25 @@ Output: Mon Jan 12 10:30:00 UTC 2026
 
 The `$()` syntax requires balanced parentheses. The count uses the BODY's own quote state (lexer.md §7.1 rule 4). A `(` or `)` does not count when it sits inside an open single-quote, double-quote, or backtick region of the body. A backslash-escaped one does not count either. The scan operates on runes:
 
-```
-FIND_MATCHING_PAREN(runes, start) -> index or NONE
-    # Quote-state aware. A paren inside a quoted body region, and an
-    # escaped paren, are both skipped (lexer.md §7.1 rule 4).
-
-    depth = 1
-    for i from start to the last rune:
-        skip an escaped rune, and track the body's own quote depths
-        if runes[i] == ( :  depth = depth + 1
-        if runes[i] == ) :  depth = depth - 1
-                            if depth == 0: return i
-    return NONE
+```go
+// Quote-state aware: parens inside quoted body regions and escaped
+// parens are skipped (lexer.md §7.1 rule 4)
+func findMatchingParen(runes []rune, startIdx int) int {
+    depth := 1
+    for i := startIdx; i < len(runes); i++ {
+        // ... skip escaped runes and track the body's quote depths ...
+        switch runes[i] {
+        case '(':
+            depth++
+        case ')':
+            depth--
+            if depth == 0 {
+                return i
+            }
+        }
+    }
+    return -1  // Not found
+}
 ```
 
 This is what makes `echo $(echo ")")` valid: the quoted `)` is body content, not a closing delimiter (§10.1 rule 8).
@@ -849,28 +907,51 @@ The canonical error-string table lives in diagnostics.md §5. The quote-related 
 
 The lexer reports the same strings for the same conditions (lexer.md §9).
 
-### 11.2 Error Detection
+### 11.2 Error Detection Code
 
-At end of input the scanner examines each counter in turn. A counter that is still open contributes one error. That error carries the canonical string of §11.1. Its span runs from the region's recorded open position to the end of the input:
-
+```go
+// Check for unclosed quotes
+if singleQuoteDepth%2 != 0 {
+    a.errors = append(a.errors, SyntaxError{
+        Start:   start,
+        End:     a.pos,
+        Message: "unclosed single quote",
+    })
+}
+if doubleQuoteDepth%2 != 0 {
+    a.errors = append(a.errors, SyntaxError{
+        Start:   start,
+        End:     a.pos,
+        Message: "unclosed double quote",
+    })
+}
+if backtickDepth%2 != 0 {
+    a.errors = append(a.errors, SyntaxError{
+        Start:   start,
+        End:     a.pos,
+        Message: "unclosed backtick",
+    })
+}
+if parenDepth > 0 {
+    a.errors = append(a.errors, SyntaxError{
+        Start:   start,
+        End:     a.pos,
+        Message: "unclosed command substitution $(...)",
+    })
+}
 ```
-for each counter that is still open:
-    REPORT(start = the recorded open position,
-           end   = end of input,
-           message = the canonical string for that counter)
-```
-
-The counters are examined innermost first. The report therefore reads outward from the deepest unclosed region.
 
 ### 11.3 Error Position Tracking
 
-Every reported error carries a position. A caret diagnostic points at that position (diagnostics.md):
+Errors include position information for accurate error reporting (positions are rune indices):
 
-| Field | Meaning |
-|-------|---------|
-| `Start` | The first rune of the span, counted from 0 |
-| `End` | One past the last rune of the span |
-| `Message` | The canonical error string (§11.1) |
+```go
+type SyntaxError struct {
+    Start   int    // Rune position (0-indexed)
+    End     int    // Rune position (exclusive)
+    Message string
+}
+```
 
 ---
 
@@ -1054,43 +1135,66 @@ Two behaviors are POSIX-identical by design. They are stated here to prevent dou
 
 ---
 
-## 14. Vocabulary Reference
+## 14. Reference
 
-This section gathers the names this file uses. Each one is defined where its owning file says (README, authority map).
+### 14.1 Key Functions
 
-### 14.1 Operations
+```go
+// Syntax Analysis
+func Analyze(input string) *AnalysisResult
 
-| Operation | Yields | Canonical in |
-|-----------|--------|--------------|
-| Scan | One pass over the input, producing the tokens both views project from (§1.3) | lexer.md |
-| Analyze | The analysis result: analyzed tokens, the errors, and a validity flag | highlighting.md |
-| Tokenize | The execution view: `TokenContext` values, or the first error | lexer.md |
-| Expand tilde | The token with a leading `~` resolved | expansion.md |
-| Expand variables | The token with `$NAME`, `${NAME}`, and `$?` resolved | expansion.md |
-| Expand command substitution | The token with `$(...)` and backtick bodies replaced by their output | expansion.md |
-| Strip escape markers | The value with every remaining marker rune removed (§7.2) | lexer.md |
+// Tokenization
+func Tokenize(input string) ([]TokenContext, error)
 
-The component that runs a substitution body is the substitution executor (expansion.md). It is deliberately not called a subshell. That term is reserved for the future `()` grouping construct.
+// Expansion (pipeline and suppression flags: expansion.md §Expansion Order)
+func ExpandTilde(token string) string
+func ExpandEnvironment(token string, lastStatus int) string
+func ExpandCommandSubstitution(token string, executor SubstitutionExecutor) (string, error)
 
-### 14.2 Constants
+// Utilities
+func StripEscapeMarkers(s string) string
+```
 
-| Name | Value | Purpose |
-|------|-------|---------|
-| Escape marker | U+0001 | Marks an escaped `$` or backtick between the lexer and the expander (§7.1) |
+The name `SubstitutionExecutor` is deliberate (expansion.md). "Subshell" is reserved for the future `()` grouping construct.
 
-### 14.3 Data
+### 14.2 Key Constants
 
-| Name | Fields | Defined in |
-|------|--------|------------|
-| `TokenContext` | `Content`, `WasSingleQuoted`, `WasQuoted`, `IsOperator` | §2.4 |
-| `AnalyzedToken` | `Type`, `Value`, `Start`, `End`, `Depth` | §9.3 |
-| Reported error | `Start`, `End`, `Message` | §11.3 |
+```go
+const EscapeMarker = '\x01'  // Marks escaped dollar signs and backticks
+```
+
+### 14.3 Key Data Structures
+
+```go
+// Lexer output
+type TokenContext struct {
+    Content         string
+    WasSingleQuoted bool
+    WasQuoted       bool
+    IsOperator      bool
+}
+
+// Analyzer output
+type AnalyzedToken struct {
+    Type  SemanticType
+    Value string
+    Start int
+    End   int
+    Depth int
+}
+
+type SyntaxError struct {
+    Start   int
+    End     int
+    Message string
+}
+```
 
 ---
 
-## 15. Conformance Cases
+## 15. Testing Considerations
 
-### 15.1 Required Cases
+### 15.1 Critical Test Cases
 
 1. **Nesting decisions (§5.2)**: an open at depth 0. Each neighbor condition (a)–(c) flipping NEST to CLOSE on its own. An even-count unclosed input, such as `'a 'b`. An odd count, which is always unclosed
 2. **Quote isolation**: Verify different-type quotes inside open regions are literal (§5.3)

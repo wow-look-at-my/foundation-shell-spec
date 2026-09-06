@@ -46,35 +46,55 @@ User Input
 
 ## Shell Layer
 
-### Shell State
+### Shell Structure
 
-A shell instance carries exactly this state:
+```go
+type Shell struct {
+    stdin         io.Reader
+    stdout        io.Writer
+    stderr        io.Writer
+    isInteractive bool
+    lastExitCode  int
+    executor      expander.SubstitutionExecutor
+}
+```
 
-| Field | Meaning |
-|-------|---------|
-| stdin, stdout, stderr | The three streams the shell reads from and writes to. They MUST be substitutable — the shell's behavior may not depend on any of them being a terminal, except where this file says "interactive" |
-| interactive | Whether the shell runs in interactive mode (§Run Modes) |
-| last exit status | The value behind `$?` and the prompt color (§Last Exit Code) |
-| substitution executor | The component that runs command-substitution bodies (§Command Substitution Executor, expansion.md §Executor Interface) |
+The name `SubstitutionExecutor` is deliberate. "Subshell" is reserved for the future `()` grouping construct.
 
-"Subshell" is deliberately NOT the name of the substitution executor: the term is reserved for the future `()` grouping construct.
+### Creation
+
+```go
+// Standard I/O, specify interactivity
+func New(interactive bool) *Shell
+
+// Custom I/O streams (for testing)
+func NewWithIO(stdin io.Reader, stdout, stderr io.Writer, interactive bool) *Shell
+```
 
 ### Run Modes
 
 #### Interactive Mode
 
-Active when the shell is interactive.
+Active when `isInteractive == true`.
 
-- Reads ONE LINE at a time through the line editor, with syntax highlighting and a colored prompt
+- Reads ONE LINE at a time via readline, with syntax highlighting and a colored prompt
 - **Each line is a separate parse and a separate execution.** `$?` therefore reflects the previous line (expansion.md §Special Parameters)
 - Empty lines are silently skipped
 - Handles Ctrl+C (clear line, new prompt) and Ctrl+D (exit)
+
+```go
+func (s *Shell) runInteractive(ctx context.Context) int
+```
 
 Required features. The shell prints a welcome message on start. The prompt is a green `$` after a success and a red `$` after a failure. The line under edit is highlighted as it is typed (highlighting.md).
 
 #### Non-Interactive Mode (Whole-Input)
 
-Active when the shell is not interactive (piped stdin, no TTY).
+Active when `isInteractive == false` (piped stdin, no TTY).
+
+```go
+func (s *Shell) runNonInteractive(ctx context.Context) int
+```
 
 The shell reads **ALL of stdin to EOF**, parses the entire text as **ONE input**, and executes the resulting single chain in order. Within that input, unquoted newlines separate commands (lexer.md §3.4) and `#` comments — including a shebang line — are removed by the lexer (lexer.md §8).
 
@@ -96,7 +116,11 @@ The shell's exit status is the chain's final status (or the `exit` status, or 1 
 
 #### Script Execution
 
-Script mode takes a filename. It opens that file, reads it **in full**, and executes it exactly like non-interactive whole-input mode. Two notes:
+```go
+func (s *Shell) RunScript(ctx context.Context, filename string) int
+```
+
+Opens `filename`, reads it **in full**, and executes it exactly like non-interactive whole-input mode. Two notes:
 
 - The script file is NOT the shell's stdin. Commands inherit the stdin the shell itself was started with (e.g. the terminal), so `fsh script.sh < data.txt` lets commands in the script read `data.txt`
 - The shebang line is an ordinary `#` comment (lexer.md §8). No special first-line handling exists or is needed
@@ -105,22 +129,37 @@ If the file cannot be opened: `cannot open script file <name>: <os reason>` on s
 
 #### Single Command Execution
 
-The shell also accepts one input as a string. It parses that string as ONE input with the same whole-input semantics (newlines inside the string separate commands) and executes it. This is the mode a non-interactive one-shot invocation uses, which joins its arguments into the command string.
+```go
+func (s *Shell) RunCommand(ctx context.Context, cmdStr string) int
+```
+
+Parses `cmdStr` as ONE input with the same whole-input semantics (newlines inside the string separate commands) and executes it. This is the entry point a one-shot invocation uses, which joins its arguments into the command string.
 
 ## Chain Execution
 
 ### Chain Structure
 
-A chain is the parser's output (parser.md). It holds an ordered list of commands and an ordered list of the operators between them. The invariant is that a chain of N commands carries exactly N−1 operators.
+```go
+type Chain struct {
+    Commands  []*CommandSpec
+    Operators []token.TokenType
+}
+```
 
-### Chain Execution Interface
+Invariant: `len(Operators) == len(Commands) - 1` (parser.md).
 
-Chain execution takes a chain, the three streams, and a cancellation signal. It yields two results:
+### Chain Execution Functions
 
-1. An exit status. This is the ordinary outcome, including every kind of command failure.
-2. An internal-failure indication. This is reserved for a broken invariant, such as an absent chain, or for a failure of the I/O plumbing itself.
+```go
+// Default I/O
+func Execute(ctx context.Context, chain *parser.Chain) (exitCode int, err error)
 
-Ordinary command failures — command not found, redirection open failure, non-zero exits — are never chain-fatal. Each one is an exit status (see §Runtime Failures Never Abort the Chain).
+// Custom I/O
+func ExecuteWithIO(ctx context.Context, chain *parser.Chain,
+    stdin io.Reader, stdout, stderr io.Writer) (exitCode int, err error)
+```
+
+The `error` return is reserved for INTERNAL failures, such as a nil chain or the I/O plumbing. Ordinary command failures are never chain-fatal errors. A command not found, a redirection open failure, and a non-zero exit are each an exit status (see §Runtime Failures Never Abort the Chain).
 
 ### Execution Algorithm
 
@@ -156,14 +195,24 @@ cat < /missing || echo recovered   # prints recovered; status 0
 
 ### Command Substitution Executor
 
-The substitution executor carries the shell's stdin, its stderr, and the cancellation signal. It takes one command body as a string and yields three results: the captured output, an exit status, and an error indication.
+```go
+type Executor struct {
+    ctx    context.Context
+    stdin  io.Reader
+    stderr io.Writer
+}
 
-It is the component the expansion layer calls (expansion.md §Executor Interface). Behavior:
+func NewExecutor(ctx context.Context, stdin io.Reader, stderr io.Writer) *Executor
+
+func (e *Executor) Execute(command string) (output string, exitCode int, err error)
+```
+
+`Executor` is the component the expansion layer calls (expansion.md §Executor Interface). Behavior:
 
 1. **Recursive parse**: the body is parsed with the SAME executor, so substitutions nested inside the body expand through recursion (expansion.md §Recursive Execution)
 2. **Same process**: the body's chain runs in-process, through the usual chain executor. A buffer captures its stdout. Its stderr goes to the shell's stderr, and its stdin is the shell's stdin
 3. **Return values**: captured stdout and the chain's final status. The CALLER (the expansion layer) discards the status (expansion.md §Failure Semantics)
-4. **Errors**: the error indication is set only when the body fails to PARSE (surfaced as `parse error: command substitution error: <err>`) or on internal failure. A runtime command failure in the body prints to stderr and sets NO error indication. The substitution then yields whatever stdout the buffer holds, and the outer line continues
+4. **Errors**: `err` is non-nil only when the body fails to PARSE (surfaced as `parse error: command substitution error: <err>`) or on internal failure. A runtime command failure in the body prints to stderr and sets NO error indication. The substitution then yields whatever stdout the buffer holds, and the outer line continues
 5. **State mutations are visible**: builtins and assignments in the body mutate the shell (§Builtin Commands). An `exit` in the body stops only the body's own sequence (§exit)
 
 Benefits of the same-process model: access to the same environment, no shell-spawning overhead, consistent behavior with the main shell.
@@ -178,7 +227,10 @@ cmd1 | cmd2 | cmd3 && cmd4 | cmd5
    Segment 1           Segment 2
 ```
 
-Pipeline execution takes the segment's commands plus the three streams the segment inherits.
+```go
+func executePipelineWithIO(ctx context.Context, commands []*parser.CommandSpec,
+    defaultStdin io.Reader, defaultStdout, defaultStderr io.Writer) (int, error)
+```
 
 ### Algorithm
 
@@ -231,53 +283,108 @@ Builtins execute IN-PROCESS even as pipeline members (§Builtin Commands). Their
 cd / | cat ; pwd      # prints /   (POSIX shells print the original directory)
 ```
 
-### Concurrent Writes to Stderr
+### Thread Safety
 
-The pipeline's commands run at the same time and share one stderr. That stderr MUST serialize each write, so no two error messages interleave.
+Stderr is wrapped in a synchronized writer. Concurrent pipeline commands therefore cannot interleave their error output:
+
+```go
+type syncWriter struct {
+    mu sync.Mutex
+    w  io.Writer
+}
+```
 
 ## Command Execution
 
-### Command Structure
+### CommandSpec Structure
 
-A command is the parser's per-command record (parser.md). It holds the expanded argument words. It also holds the redirection fields: an input file, an output file, and an error file. Each output field carries a flag that says whether the file is appended to or truncated.
+```go
+type CommandSpec struct {
+    Args         []string
+    InputFile    string
+    OutputFile   string
+    ErrorFile    string
+    AppendOutput bool
+    AppendError  bool
+}
+```
 
-### Command Execution Interface
+### Execute Function
 
-Command execution takes one command, the three streams, and the cancellation signal. It yields an exit status and an internal-failure indication.
+```go
+func Execute(ctx context.Context, spec *parser.CommandSpec,
+    stdin io.Reader, stdout, stderr io.Writer) (exitCode int, err error)
+```
 
 ### Execution Flow
 
 ```
-1. Validate: the command exists and has at least one argument word
+1. Validate: spec != nil && len(Args) > 0
 2. Open redirections in order: InputFile, OutputFile, ErrorFile
    (redirection.md §5.2). On open failure: print the canonical message
    (redirection.md §9) to the command's stderr, return status 1 —
    the command does NOT execute
-3. Track opened files, so step 5 can close every one of them
-4. Standalone assignment? → perform it (§Standalone Assignment) Builtin?              → run it in-process (§Builtin Commands) Otherwise             → run it as an external command (§External Command Execution)
-5. Close the tracked files and return the exit status
+3. Track opened files for cleanup (deferred close)
+4. Standalone assignment? → perform it (§Standalone Assignment)
+   Builtin?              → ExecuteBuiltin (in-process)
+   Otherwise             → executeExternal
+5. Return the exit status
 ```
 
 ### External Command Execution
 
-The shell resolves the command name through `$PATH`, starts it with the command's three streams, and waits for it. The outcome maps to a status by the FIRST matching rule in this order:
+```go
+func executeExternal(ctx context.Context, name string, args []string,
+    stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 
-| Order | Outcome | Message to stderr | Status |
-|-------|---------|-------------------|--------|
-| 1 | The child ran and exited normally | (none from the shell) | The child's own status, 0–255 |
-| 2 | Execution was cancelled (§Signals and Cancellation) | (none) | 130 |
-| 3 | The command name resolves to nothing | `<name>: command not found` | 127 |
-| 4 | The name resolves but cannot be executed — permission denied, a directory, or an unrecognized executable format | `<name>: <os reason>` | 126 |
-| 5 | The child was killed by signal N | (none from the shell) | 128+N |
-| 6 | The child's write failed because its consumer had exited (§Early Exit Terminates Producers) | (none) | 0 |
-| 7 | Any other start-up or plumbing failure | `<name>: <os reason>` | 1 |
+    cmd := exec.CommandContext(ctx, name, args...)
+    cmd.Stdin = stdin
+    cmd.Stdout = stdout
+    cmd.Stderr = stderr
 
-Two orderings in that table are normative, not incidental:
+    err := cmd.Run()
+    if err == nil {
+        return 0, nil
+    }
 
-- The spawn failures (rows 3 and 4) are classified BEFORE any exit-status reading. A shell that cannot start a command has no exit status to read.
-- The signal case (row 5) is classified BEFORE the normal-exit case (row 1). A child killed by signal N reports 128+N. It never reports the placeholder value a wait-status reader may give for a signal death.
+    // Interrupt / cancellation (§Signals and Cancellation)
+    if ctx.Err() != nil {
+        return 130, nil
+    }
 
-`<os reason>` is the bare operating-system error text — `permission denied`, `is a directory`, `exec format error`. It carries no wrapper and no path prefix.
+    // Spawn failures - classified BEFORE the exit-status cases
+    if errors.Is(err, exec.ErrNotFound) {
+        fmt.Fprintf(stderr, "%s: command not found\n", name)
+        return 127, nil
+    }
+    if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ENOEXEC) ||
+        errors.Is(err, syscall.EISDIR) {
+        fmt.Fprintf(stderr, "%s: %s\n", name, osReason(err))
+        return 126, nil
+    }
+
+    // Ran and exited non-zero, or was killed by a signal
+    var exitErr *exec.ExitError
+    if errors.As(err, &exitErr) {
+        if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+            return 128 + int(ws.Signal()), nil
+        }
+        return exitErr.ExitCode(), nil
+    }
+
+    // Producer terminated because its consumer exited (§Early Exit):
+    // success-equivalent, silent
+    if errors.Is(err, io.ErrClosedPipe) {
+        return 0, nil
+    }
+
+    // Any other failure: generic
+    fmt.Fprintf(stderr, "%s: %s\n", name, osReason(err))
+    return 1, nil
+}
+```
+
+`osReason(err)` is the bare OS error text, such as `permission denied`, `is a directory`, or `exec format error`. It is unwrapped, with no `fork/exec <path>:` prefix. A signal death makes `ExitCode()` report −1. That is why the `Signaled()` branch MUST come first. A child killed by signal N reports 128+N, never −1 and never 255.
 
 ## Builtin Commands
 
@@ -297,11 +404,20 @@ Anything else — including `echo`, `true`, `false`, `test` — is an external c
 
 ### Detection
 
-A command word is a builtin exactly when it equals one of the names listed above. Standalone assignment is not name-based (§Standalone Assignment).
+```go
+func IsBuiltin(name string) bool
+```
 
-### Execution Interface
+True exactly for the names listed above. Standalone assignment is not name-based (§Standalone Assignment).
 
-Builtin execution takes the name, the argument words, and the streams the command runs on. It yields the builtin's exit status directly. Its error indication is reserved for the `exit` sentinel and for internal failures. Ordinary builtin failures, such as a missing directory or an invalid export name, are NOT errors. The builtin prints its own message to stderr and returns a non-zero status. The chain then continues under the usual operator logic.
+### Execution API
+
+```go
+func ExecuteBuiltin(name string, args []string,
+    stdin io.Reader, stdout, stderr io.Writer) (exitCode int, err error)
+```
+
+Builtins return their exit status directly. The `err` return is reserved for the `exit` sentinel and for internal failures. Ordinary builtin failures, such as a missing directory or an invalid export name, are NOT errors. The builtin prints its own message to stderr and returns a non-zero status. The chain then continues under the usual operator logic.
 
 ### Common Properties
 
@@ -347,7 +463,15 @@ exit [code]
 | Non-numeric argument | `exit: <arg>: numeric argument required` to stderr, status 2, and the shell does NOT exit |
 | Extra arguments | Ignored (only the first is examined) |
 
-**Sentinel semantics.** `exit` NEVER terminates the process from inside the builtin. A direct process exit there bypasses output capture, the closing of redirection files, and the teardown of the line editor. The builtin returns its code together with an `exit` sentinel instead. Every enclosing layer can see that sentinel and act on it.
+**Sentinel semantics.** `exit` NEVER terminates the process directly. An `os.Exit` inside the builtin bypasses output capture, deferred file closes, and readline teardown. It returns its code together with a sentinel error instead:
+
+```go
+type ErrExit struct{ Code int }
+
+func (e ErrExit) Error() string {
+    return fmt.Sprintf("exit %d", e.Code)
+}
+```
 
 Each layer decides what the sentinel means:
 
@@ -470,7 +594,13 @@ Command → Exit Status → Operator Logic (operators.md) → Shell.lastExitCode
 
 ### Last Exit Code
 
-The shell keeps one last-exit-status register (§Shell State). That register is THE value behind `$?` (expansion.md §Special Parameters) and the prompt color. It starts at 0 and is updated after each command line:
+```go
+type Shell struct {
+    lastExitCode int
+}
+```
+
+`lastExitCode` is THE value behind `$?` (expansion.md §Special Parameters) and the prompt color. It starts at 0 and is updated after each command line:
 
 | Event | New value |
 |-------|-----------|
@@ -499,23 +629,31 @@ While a foreground child runs, SIGINT and SIGQUIT delivered to the shell are **f
 | Ctrl+D | Exit the shell |
 | Valid command | Parse and execute |
 
-### Cancellation
+### Context Cancellation
 
-Every execution entry point accepts a cancellation signal. Cancellation is treated as an interrupt. The running child is killed and the command reports **130** (§External Command Execution).
+All execution functions accept a `context.Context`. Cancellation is treated as an interrupt. The running child is killed. The command then reports **130**. `exec.CommandContext` provides the kill. The executor maps the result to 130 (§External Command Execution).
 
 ## Error Handling
 
 ### Parse Errors
 
-When a parse fails, the shell reports it by the FIRST matching rule:
+```go
+cmdChain, err := parser.ParseWithExecutor(line, s.executor)
+if err != nil {
+    if errors.Is(err, parser.ErrEmptyInput) {
+        return true // silent skip (interactive)
+    }
+    result := syntax.Analyze(line)
+    if !result.Valid {
+        fmt.Fprint(s.stderr, syntax.FormatDiagnostics(line, result.Errors))
+    } else {
+        fmt.Fprintf(s.stderr, "parse error: %v\n", err)
+    }
+    s.lastExitCode = 1
+}
+```
 
-| Case | Report | Last status |
-|------|--------|-------------|
-| The input is empty | Nothing. In interactive mode the shell shows a new prompt | Unchanged |
-| The analyzer also rejects the input | The caret diagnostic for the analyzer's errors (diagnostics.md) | 1 |
-| The analyzer accepts the input, but the parser rejects it | The parser's canonical string (diagnostics.md §5.2), prefixed with `parse error: ` | 1 |
-
-The middle case is the normal one. The analyzer detects every quote-state and structural problem the parser rejects on (highlighting.md §7.1). In whole-input mode a parse error rejects the entire input (§Non-Interactive Mode).
+Caret diagnostics come from the analyzer when it detects the problem (diagnostics.md). Otherwise the parser's canonical string (diagnostics.md §5.2) prints with the `parse error: ` prefix. In whole-input mode a parse error rejects the entire input (§Non-Interactive Mode).
 
 ### Runtime Failures
 
@@ -532,43 +670,73 @@ All failures then flow through operator logic as exit statuses (§Runtime Failur
 
 ### Internal Errors
 
-An internal-failure indication from chain execution means a broken invariant or a failure of the I/O plumbing. It never means a command failed. The shell reports it as `execution error: <err>`. In normal operation this path is never taken.
+A non-nil `error` from `ExecuteWithIO` indicates an internal failure, such as a broken invariant or the I/O plumbing. It never indicates a command failure. The shell reports it as `execution error: <err>`. In normal operation this path is never taken.
 
-### Named Error Conditions
+### Defined Errors
 
-Two failures are named because other files refer to them:
+```go
+var ErrEmptyCommand = errors.New("empty command") // parser-level (diagnostics.md §5.2)
 
-| Name | Meaning |
-|------|---------|
-| empty command | A command with no words at all, rejected by the parser (diagnostics.md §5.2) |
-| `exit` sentinel | The value `exit` returns instead of ending the process (§exit) |
+type ErrExit struct{ Code int } // exit sentinel (§exit)
+```
 
 ## Prompt System
 
-The interactive prompt is `$ ` followed by one space, wrapped in a color escape:
+### Prompt Colors
 
-| Last exit status | Prompt |
-|------------------|--------|
-| 0 | `\033[32m$ \033[0m` (green) |
-| Non-zero | `\033[31m$ \033[0m` (red) |
+```go
+const (
+    promptSuccess = "\033[32m" // Green
+    promptFailure = "\033[31m" // Red
+    promptReset   = "\033[0m"
+)
+```
 
-The reset escape at the end is required. Without it, the color leaks into the text the user types.
+### Prompt Generation
+
+```go
+func (s *Shell) getPrompt() string {
+    if s.lastExitCode == 0 {
+        return promptSuccess + "$ " + promptReset
+    }
+    return promptFailure + "$ " + promptReset
+}
+```
 
 ## Interactive Features
 
-The interactive line editor MUST provide:
+### Readline Configuration
 
-- The prompt above, recomputed before each line, so its color tracks the last status
-- Live syntax highlighting of the line being edited. The highlighter takes the raw line and returns the same text with color escapes applied (highlighting.md)
-- `^C` echoed when the user interrupts a line, and `exit` echoed when the user ends input with Ctrl+D
-- Output on the shell's own stdout and stderr, not on a separate channel
+```go
+cfg := &readline.Config{
+    Prompt:          s.getPrompt(),
+    InterruptPrompt: "^C",
+    EOFPrompt:       "exit",
+    Painter:         painter, // syntax highlighting
+    Stdout:          s.stdout,
+    Stderr:          s.stderr,
+}
+```
+
+### Syntax Highlighting Painter
+
+```go
+type syntaxPainter struct {
+    highlighter *syntax.Highlighter
+}
+
+func (p *syntaxPainter) Paint(line []rune, pos int) []rune {
+    return []rune(p.highlighter.Highlight(string(line)))
+}
+```
 
 ## Examples
 
 ### Simple Command
 
 ```
-Input: ls -la Flow:  Shell → Parser → Chain(1 cmd) → Command → external execution of ls with [-la]
+Input: ls -la
+Flow:  Shell → Parser → Chain(1 cmd) → Command → executeExternal(ls, [-la])
 ```
 
 ### Pipeline
@@ -576,7 +744,10 @@ Input: ls -la Flow:  Shell → Parser → Chain(1 cmd) → Command → external 
 ```
 Input: cat file | grep pattern | wc -l
 Flow:  Shell → Parser → Chain(3 cmds, 2 pipes)
-       → one pipeline segment, all members running at once: cat file      (stdin → pipe1) grep pattern  (pipe1 → pipe2) wc -l         (pipe2 → stdout)
+       → executePipelineWithIO:
+         goroutine 1: cat file      (stdin → pipe1)
+         goroutine 2: grep pattern  (pipe1 → pipe2)
+         goroutine 3: wc -l         (pipe2 → stdout)
        Status: wc's
 ```
 
@@ -619,7 +790,7 @@ Flow:
 ```
 Input: echo $(whoami)
 Flow:
-1. Parser expands the token: the substitution executor runs "whoami"
+1. Parser expands the token: Executor.Execute("whoami")
 2. Recursive parse + in-process execution; stdout captured: "user\n"
 3. Trailing newline trimmed → token becomes "user"; status discarded
 4. echo runs with argument "user"
@@ -635,27 +806,26 @@ Script file:
     echo done
 
 Flow:
-1. Script mode reads the file in full. The lexer drops the shebang comment, and newlines become separators
+1. RunScript reads the file in full. The lexer drops the shebang comment, and newlines become separators
 2. ONE chain executes: export → echo hello → false → echo done
 3. Shell exits with echo's status (0)
 ```
 
-## Conformance Cases
+## Testing Considerations
 
-These are the behaviors a conformance suite MUST cover. They are stated as required outcomes, not as a test design.
+### Shell Testing
 
-### Run Modes
-
-- Substituted streams: the shell behaves identically when its streams are not a terminal (§Shell State)
+- Use `NewWithIO` with buffers for controlled I/O
+- Use `os.Pipe()` for stdin when testing interactive mode (readline requires a ReadCloser)
 - Whole-input mode: multi-line stdin executes as one parse, a late parse error prevents ALL execution, and `$(cat)` sees EOF
 
-### Chain Behavior
+### Chain Testing
 
 - Skip propagation: `false && a && b` (nothing runs, status 1), `true || a || b` (nothing runs, status 0), `false && a || c` (c runs)
 - Failure recovery: `nosuchcmd || fallback`, `nosuchcmd ; next`, `cat < /missing || recovered`
 - Early-exit pipelines: `yes | head -1` terminates, and the producer failure stays silent
 
-### Command Behavior
+### Command Testing
 
 - Exit codes: 127 (not found), 126 (not executable), 128+N (signal death), 130 (interrupt), pass-through 1–255
 - Builtins: each builtin's status and message table
@@ -664,7 +834,7 @@ These are the behaviors a conformance suite MUST cover. They are stated as requi
 - Assignment recognition, including the quoted and multi-word non-assignments
 - Redirection failures: message format, status 1, chain continues
 
-### Signal Behavior
+### Signal Testing
 
 - SIGINT during the SECOND command of a session must still reach the child (no disposition decay)
 - The shell survives SIGINT while a child runs, and records 130
@@ -672,16 +842,28 @@ These are the behaviors a conformance suite MUST cover. They are stated as requi
 
 ## Resource Management
 
-### File Handles
+### File Handle Cleanup
 
-Every redirection file opened for a command closes after that command completes. This holds on success, on failure, and on interrupt alike (redirection.md §12.2).
+```go
+var filesToClose []*os.File
+defer func() {
+    for _, f := range filesToClose {
+        f.Close()
+    }
+}()
+```
 
-### Pipes
+All redirection file handles close after the command completes. This holds on success, on failure, and on interrupt alike (redirection.md §12.2).
 
-Each pipeline member closes BOTH of its pipe ends when its command finishes. Closing the stdout write end gives the downstream member EOF. Closing the stdin read end terminates upstream producers (§Early Exit Terminates Producers).
+### Pipe Cleanup
 
-### The Line Editor
+Each pipeline goroutine closes BOTH of its pipe ends when its command finishes. Closing the stdout write end gives the downstream member EOF. Closing the stdin read end terminates upstream producers (§Early Exit Terminates Producers).
 
-The interactive line editor is torn down before the shell exits. The terminal is left in its original mode.
+### Readline Cleanup
 
-Every cleanup above depends on `exit` raising its sentinel rather than ending the process on the spot (§exit).
+```go
+rl, err := readline.NewEx(cfg)
+defer rl.Close()
+```
+
+The `exit` sentinel guarantees these cleanups run, because it never calls `os.Exit` (§exit).

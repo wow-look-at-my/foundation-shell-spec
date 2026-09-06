@@ -51,39 +51,67 @@ Input String
 
 Represents a single command with its arguments and I/O configuration.
 
+```go
+type CommandSpec struct {
+    Args         []string  // Command name and arguments
+    InputFile    string    // Input redirection target (< file)
+    OutputFile   string    // Output redirection target (> or >> file)
+    ErrorFile    string    // Error redirection target (2> or 2>> file)
+    AppendOutput bool      // True if >> was used
+    AppendError  bool      // True if 2>> was used
+}
+```
+
 #### Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Args` | word list | Command name at index 0, arguments at indices 1 and up |
-| `InputFile` | path | Target of a `<` redirection. Empty when there is none |
-| `OutputFile` | path | Target of a `>` or `>>` redirection. Empty when there is none |
-| `ErrorFile` | path | Target of a `2>` or `2>>` redirection. Empty when there is none |
-| `AppendOutput` | flag | True for `>>`, false for `>` |
-| `AppendError` | flag | True for `2>>`, false for `2>` |
+| `Args` | `[]string` | Command name at index 0, arguments at indices 1+ |
+| `InputFile` | `string` | Path for stdin redirection, empty if not redirected |
+| `OutputFile` | `string` | Path for stdout redirection, empty if not redirected |
+| `ErrorFile` | `string` | Path for stderr redirection, empty if not redirected |
+| `AppendOutput` | `bool` | `true` for `>>`, `false` for `>` |
+| `AppendError` | `bool` | `true` for `2>>`, `false` for `2>` |
 
 ### Chain
 
 Represents a sequence of commands connected by operators.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `Commands` | command list | The commands, in input order |
-| `Operators` | operator list | The operators between them |
+```go
+type Chain struct {
+    Commands  []*CommandSpec      // List of commands
+    Operators []token.TokenType   // Operators between commands
+}
+```
 
 #### Invariant
 
-For N commands there are exactly N−1 operators connecting them.
+```
+len(Operators) == len(Commands) - 1
+```
 
-### The Classified Token
+For N commands, there are exactly N-1 operators connecting them.
 
-The intermediate form, after expansion and classification. It carries a token type and a value.
+### classifiedToken
+
+Internal representation after expansion and classification.
+
+```go
+type classifiedToken struct {
+    tokenType token.TokenType
+    value     string
+}
+```
 
 ## Parsing Pipeline
 
 ### Step 1: Tokenization
 
-The lexer tokenizes the input into `TokenContext` values (lexer.md §2.1).
+The lexer tokenizes the input into `TokenContext` structures:
+
+```go
+tokenContexts, err := lexer.Tokenize(input)
+```
 
 If tokenization fails, return an error:
 ```
@@ -166,7 +194,7 @@ cmd_a & cmd_b arg     # ONE command: cmd_a with args [&, cmd_b, arg].
                       # cmd_b never runs, and nothing says so
 ```
 
-Both outcomes are worse than the `2>&1` trap §9.5 already guards against: that one creates a stray file, this one hangs the shell or silently drops half the line. The parser rejects it for the same reason.
+Both outcomes are worse than the `2>&1` trap that §9.5 already guards against. That one creates a stray file. This one hangs the shell, or silently drops half the line. The parser rejects it for the same reason.
 
 **Behavior:**
 - Parse error: `background execution is not supported`
@@ -180,21 +208,21 @@ $ echo 'a & b'        # OK: quoted
 $ echo "u?x=1&y=2"    # OK: & inside a longer word
 ```
 
-A caller that wants a command to outlive the shell runs it under a tool that owns that job — `nohup`, a supervisor, or the caller's own process manager.
+A caller can want a command to outlive the shell. That caller runs it under a tool built for the job, such as `nohup`, a supervisor, or its own process manager.
 
 #### Assignment Then Use Is Guarded
 
 **Condition:** A command expands `$NAME` when an EARLIER command in the same input assigned `NAME`.
 
-The whole input expands in one pass before any of it runs, so the expansion reads the value from before the input (expansion.md §Assignment Is Not Visible to the Same Input). Unguarded, `OUT=$(cmd); echo $OUT` prints an empty line and reports success — the one construct here that corrupts a result rather than stopping the caller.
+The whole input expands in one pass before any of it runs. The expansion therefore reads the value from before the input (expansion.md §Assignment Is Not Visible to the Same Input). Unguarded, `OUT=$(cmd); echo $OUT` prints an empty line and reports success. It is the one construct here that corrupts a result rather than stopping the caller.
 
 **Behavior:**
 - Parse error: `variable is assigned and used in the same input: <name>`
-- Commands are walked in order, and each command's references are tested against what EARLIER commands assigned, so a word never counts as referencing its own assignment (`X=$X` is legal)
+- Commands are walked in order. Each command's references are tested against what EARLIER commands assigned. A word therefore never counts as referencing its own assignment, and `X=$X` is legal
 - Two forms arm the guard, because both mutate the shell and both are equally invisible to a later expansion: a standalone `NAME=VALUE` (§Standalone Assignment) and `export NAME=VALUE`
 - Redirection targets are checked with the command's words: `> $OUT` picks a filename, so a stale one is worse than a stale argument
 - A single-quoted reference is NOT a reference: `sh -c 'echo $X'` hands `$X` to the child, which resolves it against the environment the assignment really did set
-- Unlike the guards above, this one has no analyzer counterpart — the analyzer does not model expansion — so it prints as a plain `parse error:` line rather than a caret block (diagnostics.md §5.2)
+- This guard has no analyzer counterpart, because the analyzer does not model expansion. It therefore prints as a plain `parse error:` line rather than a caret block (diagnostics.md §5.2)
 
 ```bash
 $ OUT=$(echo hi) ; echo $OUT
@@ -206,13 +234,13 @@ $ echo $X ; X=hi               # OK: the use precedes the assignment
 
 #### Trailing Semicolon
 
-A trailing `;` is VALID. The parser CONSUMES it: it does not appear in `Chain.Operators`, so the invariant `len(Operators) == len(Commands) - 1` is preserved.
+A trailing `;` is VALID. The parser CONSUMES it. It never appears in `Chain.Operators`. The N−1 operator invariant is therefore preserved.
 
 ```
 Input:  "echo hi ;"
 Output: Chain{
     Commands: [
-        CommandSpec{Args: ["echo", "hi"]}
+        &CommandSpec{Args: ["echo", "hi"]}
     ],
     Operators: []
 }
@@ -263,36 +291,40 @@ Redirection operators modify I/O streams.
 
 Operator detection applies ONLY to tokens the lexer marked `IsOperator: true` (see Step 2 above). For those tokens, the content-to-type mapping is:
 
-| Content | Token type |
-|---------|------------|
-| `\|` | `Pipe` |
-| `&&` | `And` |
-| `\|\|` | `Or` |
-| `;` | `Semicolon` |
-| `<` | `RedirectStdIn` |
-| `>` | `RedirectStdOut` |
-| `>>` | `RedirectStdOutAppend` |
-| `2>` | `RedirectStdErr` |
-| `2>>` | `RedirectStdErrAppend` |
-
-No other content maps to an operator type. A token marked as an operator whose content is absent from this table is an internal failure, never a word.
+```go
+// Called only for tokens with IsOperator == true
+func parseOperator(s string) (token.TokenType, bool) {
+    switch s {
+    case "|":  return token.Pipe, true
+    case "&&": return token.And, true
+    case "||": return token.Or, true
+    case ";":  return token.Semicolon, true
+    case "<":  return token.RedirectStdIn, true
+    case ">":  return token.RedirectStdOut, true
+    case ">>": return token.RedirectStdOutAppend, true
+    case "2>": return token.RedirectStdErr, true
+    case "2>>": return token.RedirectStdErrAppend, true
+    default:   return 0, false
+    }
+}
+```
 
 ## Error Handling
 
 ### Defined Errors
 
-| Name | Message |
-|------|---------|
-| `ErrEmptyInput` | `empty input` |
-| `ErrOperatorAtStart` | `unexpected operator at start` |
-| `ErrMissingRedirectionTarget` | `missing redirection target` |
-| `ErrTrailingOperator` | `unexpected operator at end` |
-| `ErrConsecutiveOperators` | `consecutive operators` |
-| `ErrEmptyCommand` | `empty command` |
-| `ErrEmptyRedirectionTarget` | `empty redirection target` |
-| `ErrFdDuplicationUnsupported` | `file descriptor duplication is not supported` |
-
-The canonical strings, with their placeholder suffixes, are in diagnostics.md §5.
+```go
+var (
+    ErrEmptyInput               = errors.New("empty input")
+    ErrOperatorAtStart          = errors.New("unexpected operator at start")
+    ErrMissingRedirectionTarget = errors.New("missing redirection target")
+    ErrTrailingOperator         = errors.New("unexpected operator at end")
+    ErrConsecutiveOperators     = errors.New("consecutive operators")
+    ErrEmptyCommand             = errors.New("empty command")
+    ErrEmptyRedirectionTarget   = errors.New("empty redirection target")
+    ErrFdDuplicationUnsupported = errors.New("file descriptor duplication is not supported")
+)
+```
 
 ### Error Format
 
@@ -328,22 +360,33 @@ Input: "echo > |"
 Error: missing redirection target: > followed by operator |
 ```
 
-## Public Interface
+## Public API
 
-A parse takes the input string, and optionally a substitution executor (expansion.md §Executor Interface). It yields a chain, or one error.
+### Parse
 
-### Parsing Without an Executor
+```go
+func Parse(input string) (*Chain, error)
+```
 
-- `$(...)` and backticks stay as literal text
-- This form suits syntax validation and any parse that must not run a command
+Parses input without command substitution expansion.
 
-### Parsing With an Executor
+- Equivalent to `ParseWithExecutor(input, nil)`
+- `$(...)` and backticks are preserved as literal text
+- Suitable for syntax validation and non-interactive parsing
 
-- `$(...)` and backticks expand during the parse
-- The executor runs the body in the shell's own process, never in an external shell (execution.md §Command Substitution Executor)
-- The interactive shell always parses this way
+### ParseWithExecutor
 
-The name is deliberate. "Subshell" is reserved for the future `()` grouping construct.
+```go
+func ParseWithExecutor(input string, executor expander.SubstitutionExecutor) (*Chain, error)
+```
+
+The name `SubstitutionExecutor` is deliberate. "Subshell" is reserved for the future `()` grouping construct.
+
+Parses input with optional command substitution expansion.
+
+- If `executor` is non-nil, `$(...)` and backticks are expanded
+- Executor runs in the same process (not external shell)
+- Used by the interactive shell with chain.Executor
 
 ## Examples
 
@@ -353,7 +396,7 @@ The name is deliberate. "Subshell" is reserved for the future `()` grouping cons
 Input:  "echo hello world"
 Output: Chain{
     Commands: [
-        CommandSpec{Args: ["echo", "hello", "world"]}
+        &CommandSpec{Args: ["echo", "hello", "world"]}
     ],
     Operators: []
 }
@@ -365,9 +408,9 @@ Output: Chain{
 Input:  "cat file.txt | grep pattern | wc -l"
 Output: Chain{
     Commands: [
-        CommandSpec{Args: ["cat", "file.txt"]},
-        CommandSpec{Args: ["grep", "pattern"]},
-        CommandSpec{Args: ["wc", "-l"]}
+        &CommandSpec{Args: ["cat", "file.txt"]},
+        &CommandSpec{Args: ["grep", "pattern"]},
+        &CommandSpec{Args: ["wc", "-l"]}
     ],
     Operators: [Pipe, Pipe]
 }
@@ -379,8 +422,8 @@ Output: Chain{
 Input:  "make && make test"
 Output: Chain{
     Commands: [
-        CommandSpec{Args: ["make"]},
-        CommandSpec{Args: ["make", "test"]}
+        &CommandSpec{Args: ["make"]},
+        &CommandSpec{Args: ["make", "test"]}
     ],
     Operators: [And]
 }
@@ -392,7 +435,7 @@ Output: Chain{
 Input:  "cat < input.txt > output.txt 2>> errors.log"
 Output: Chain{
     Commands: [
-        CommandSpec{
+        &CommandSpec{
             Args: ["cat"],
             InputFile: "input.txt",
             OutputFile: "output.txt",
@@ -421,7 +464,7 @@ Output: Chain{
 Input:  "echo $HOME"
 Output: Chain{
     Commands: [
-        CommandSpec{Args: ["echo", "/home/user"]}  // Expanded
+        &CommandSpec{Args: ["echo", "/home/user"]}  // Expanded
     ],
     Operators: []
 }
@@ -433,7 +476,7 @@ Output: Chain{
 Input:  "echo '$HOME'"
 Output: Chain{
     Commands: [
-        CommandSpec{Args: ["echo", "$HOME"]}  // Literal
+        &CommandSpec{Args: ["echo", "$HOME"]}  // Literal
     ],
     Operators: []
 }
@@ -483,7 +526,7 @@ The parser uses three expansion functions:
 2. `expander.ExpandEnvironment(value, lastStatus)` - Expand `$VAR`, `${VAR}`, and `$?`
 3. `expander.ExpandCommandSubstitution(value, executor)` - Expand `$(...)` and backticks
 
-`lastStatus` is the shell's last recorded command-line status, supplied to the parser for every parse so that `$?` can expand (expansion.md §Special Parameters; execution.md §Last Exit Code).
+`lastStatus` is the shell's last recorded command-line status, supplied to the parser for every parse so that `$?` can expand (expansion.md §Special Parameters, execution.md §Last Exit Code).
 
 ## Semantic Classification
 
@@ -510,17 +553,17 @@ REDIR_OP    := '<' | '>' | '>>' | '2>' | '2>>'
 word        := any value token (lexer.md §2.3)
 ```
 
-Every command contains at least one word — the grammar itself excludes redirection-only commands (`> file`), which the validator reports as `ErrEmptyCommand`. The optional final `;` is the consumed trailing semicolon. `word` is a lexer value token (a `TokenContext` with `IsOperator: false`); there is no separate quoted-string token type — quoting is resolved by the lexer before classification.
+Every command contains at least one word — the grammar itself excludes redirection-only commands (`> file`), which the validator reports as `ErrEmptyCommand`. The optional final `;` is the consumed trailing semicolon. `word` is a lexer value token, which is a `TokenContext` with `IsOperator: false`. No separate quoted-string token type exists. The lexer resolves quoting before classification.
 
-## Conformance Cases
+## Testing Considerations
 
 ### Valid Inputs
 
 - Single command
 - Multiple commands with pipes
 - Conditional operators (&&, ||)
-- Sequential execution (;)
-- Trailing semicolon (consumed; not in Chain.Operators)
+- Sequential execution with the semicolon operator
+- Trailing semicolon, which is consumed and never appears in Chain.Operators
 - Redirection combinations
 - Mixed operators
 - Quoted arguments (single and double)

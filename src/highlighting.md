@@ -64,73 +64,90 @@ flowchart TD
 
 An enumerated type representing the semantic meaning of a token:
 
-```
-TypeUnknown
-TypeCommand
-TypeArgument
-TypeOperator
-TypeRedirection
-TypeRedirectionTarget
-TypeSingleQuotedString
-TypeDoubleQuotedString
-TypeBacktick
-TypeCommandSubst
-TypeVariable
-TypeParenGroup
-TypeError
-TypeWhitespace
+```go
+type SemanticType int
+
+const (
+    TypeUnknown SemanticType = iota
+    TypeCommand
+    TypeArgument
+    TypeOperator
+    TypeRedirection
+    TypeRedirectionTarget
+    TypeSingleQuotedString
+    TypeDoubleQuotedString
+    TypeBacktick
+    TypeCommandSubst
+    TypeVariable
+    TypeParenGroup
+    TypeError
+    TypeWhitespace
+)
 ```
 
-`TypeUnknown` is the zero value. A token MUST never carry it once analysis finishes. The name `TypeCommandSubst` is deliberate, because `$(...)` is command substitution. "Subshell" is reserved for the future `( ... )` grouping construct.
+The name `TypeCommandSubst` is deliberate, because `$(...)` is command substitution. "Subshell" is reserved for the future `( ... )` grouping construct.
 
 #### AnalyzedToken
 
 A token with semantic information and position data:
 
-| Field | Meaning |
-|-------|---------|
-| `Type` | The semantic meaning (§3) |
-| `Value` | The raw text of the token |
-| `Start` | Character position, counted from 0, inclusive |
-| `End` | Character position, exclusive |
-| `Depth` | The maximum nesting level reached in this token, over quotes and command substitutions (§9.4) |
+```go
+type AnalyzedToken struct {
+    Type  SemanticType  // Semantic meaning
+    Value string        // Raw text of token
+    Start int           // Character position (0-indexed, inclusive)
+    End   int           // Character position (exclusive)
+    Depth int           // Max nesting level reached in this token (quotes + command substitutions) — §9.4
+}
+```
 
 #### SyntaxError
 
 A syntax error with position and message:
 
-| Field | Meaning |
-|-------|---------|
-| `Start` | Start position, counted from 0 |
-| `End` | End position, exclusive |
-| `Message` | The human-readable error description (diagnostics.md §5) |
+```go
+type SyntaxError struct {
+    Start   int     // Start position (0-indexed)
+    End     int     // End position (exclusive)
+    Message string  // Human-readable error description
+}
+```
 
 #### AnalysisResult
 
 The complete result of syntax analysis:
 
-| Field | Meaning |
-|-------|---------|
-| `Tokens` | The analyzed tokens, in input order |
-| `Errors` | The syntax errors, innermost first (§9.2) |
-| `Valid` | True exactly when `Errors` is empty |
+```go
+type AnalysisResult struct {
+    Tokens []AnalyzedToken
+    Errors []SyntaxError
+    Valid  bool  // true if len(Errors) == 0
+}
+```
 
 ### 2.2 Key Interfaces
 
 #### Theme
 
-A theme is a total map from every semantic type of §2.1 to one ANSI escape string.
+Maps semantic types to ANSI escape codes:
+
+```go
+type Theme map[SemanticType]string
+```
 
 #### Highlighter
 
 Applies syntax highlighting using a theme:
 
-A highlighter holds one theme and offers two operations over an input string:
+```go
+type Highlighter struct {
+    theme Theme
+}
 
-| Operation | Yields |
-|-----------|--------|
-| Highlight | The input with the theme's escapes applied |
-| Highlight with result | The same string, plus the syntax errors the analysis found |
+func NewHighlighter(theme Theme) *Highlighter
+func (h *Highlighter) Highlight(input string) string
+func (h *Highlighter) HighlightResult(input string) (string, []SyntaxError)
+```
 
 ---
 
@@ -397,9 +414,11 @@ echo    hello            # Multiple spaces "   " is TypeWhitespace
 
 ## 4. Analyzer Behavior
 
-### 4.1 The Analysis Operation
+### 4.1 Analysis Function
 
-Analysis takes the input string and yields one analysis result (§2.1).
+```go
+func Analyze(input string) *AnalysisResult
+```
 
 `Analyze` does NOT tokenize. `Scan` does (quoting.md §1.3), and `Analyze` is one of its two views: it calls `Scan` once and then
 
@@ -447,7 +466,11 @@ After parsing a word, its type is determined by:
 
 ### 5.1 Theme Definition
 
-A theme maps each semantic type to one ANSI escape string. Every type of §2.1 MUST have an entry.
+A Theme is a mapping from SemanticType to ANSI escape codes:
+
+```go
+type Theme map[SemanticType]string
+```
 
 ### 5.2 Default Theme
 
@@ -487,28 +510,37 @@ Common parameters:
 
 Create a custom theme by providing a Theme map:
 
-```
-custom theme:
-    TypeCommand   -> "\033[38;5;196m"   # Bright red
-    TypeArgument  -> "\033[38;5;226m"   # Yellow
-    TypeOperator  -> "\033[38;5;21m"    # Blue
-    ...
+```go
+customTheme := Theme{
+    TypeCommand:            "\033[38;5;196m", // Bright red
+    TypeArgument:           "\033[38;5;226m", // Yellow
+    TypeOperator:           "\033[38;5;21m",  // Blue
+    // ... etc
+}
+
+h := NewHighlighter(customTheme)
 ```
 
-**Partial Themes:** the highlighter falls back to the ANSI reset (`\033[0m`) for a semantic type the theme leaves undefined.
+**Partial Themes:** If a SemanticType is not defined in the theme, the highlighter falls back to ANSI reset (`\033[0m`).
 
 ### 5.5 Highlighting Application
 
 The highlighter applies colors as follows:
 
-```
-APPLY_THEME(tokens) -> string
-    output = empty
-    for each token in tokens:
-        color = the theme's escape for token.Type
-        if the theme has no entry: color = ANSI_RESET
-        append color, then token.Value, then ANSI_RESET
-    return output
+```go
+func (h *Highlighter) applyTheme(tokens []AnalyzedToken) string {
+    var builder strings.Builder
+    for _, token := range tokens {
+        color := h.theme[token.Type]  // Get color for type
+        if color == "" {
+            color = ansiReset
+        }
+        builder.WriteString(color)      // Apply color
+        builder.WriteString(token.Value) // Write token
+        builder.WriteString(ansiReset)  // Reset after token
+    }
+    return builder.String()
+}
 ```
 
 **Key Behavior:** Each token is followed by an ANSI reset to prevent color bleeding.
@@ -517,29 +549,53 @@ APPLY_THEME(tokens) -> string
 
 ## 6. REPL Integration
 
-### 6.1 The Painter Contract
+### 6.1 The Painter Interface
 
-The interactive line editor MUST offer a painting hook. The hook takes the line as written, plus the cursor position, and returns the text to display:
+The interactive line editor calls a painter on every keystroke:
 
+```go
+type Painter interface {
+    Paint(line []rune, pos int) []rune
+}
 ```
-PAINT(line, cursor_position) -> display_text
-    return HIGHLIGHT(line)      # §5.5, with the active theme
+
+### 6.2 syntaxPainter Implementation
+
+```go
+type syntaxPainter struct {
+    highlighter *Highlighter
+}
+
+func (p *syntaxPainter) Paint(line []rune, pos int) []rune {
+    return []rune(p.highlighter.Highlight(string(line)))
+}
 ```
 
-The cursor position is available to the hook. The default painter ignores it. Highlighting depends on the line alone.
+### 6.3 REPL Configuration
 
-### 6.2 Editor Configuration
+```go
+painter := &syntaxPainter{highlighter: syntax.NewHighlighter(syntax.DefaultTheme)}
 
-The editor is configured with the default theme (§5.2) and the shell's own streams. Its prompt comes from execution.md §Prompt System.
+cfg := &readline.Config{
+    Prompt:          "$ ",
+    InterruptPrompt: "^C",
+    EOFPrompt:       "exit",
+    Painter:         painter,  // Enable syntax highlighting
+    Stdout:          stdout,
+    Stderr:          stderr,
+}
 
-### 6.3 Real-Time Highlighting
+rl, _ := readline.NewEx(cfg)
+```
 
-The editor calls the painting hook on every keystroke. This gives:
+### 6.4 Real-Time Highlighting
+
+The `Paint` method is called on every keystroke. This gives:
 - Immediate visual feedback
 - Real-time error highlighting
 - Consistent highlighting as the user types
 
-### 6.4 Performance Considerations
+### 6.5 Performance Considerations
 
 The analyzer is designed to be fast enough for real-time use:
 - Single-pass analysis
@@ -590,7 +646,15 @@ When an error is detected within a word:
 
 ### 7.4 Error Position Tracking
 
-Each error carries the position fields of §2.1: an inclusive `Start`, an exclusive `End`, and the canonical `Message`.
+Each error includes precise position information:
+
+```go
+type SyntaxError struct {
+    Start   int     // Start position (0-indexed, inclusive)
+    End     int     // End position (exclusive)
+    Message string  // Human-readable description
+}
+```
 
 ### 7.5 Highlighting Errors
 
@@ -603,9 +667,13 @@ Tokens with `TypeError` type are highlighted using the theme's error color:
 
 ## 8. Diagnostics Formatting
 
-### 8.1 The Formatting Operation
+### 8.1 FormatDiagnostics Function
 
-Diagnostic formatting takes the input string and the syntax errors, and yields the text to print. That text carries:
+```go
+func FormatDiagnostics(input string, errors []SyntaxError) string
+```
+
+Formats syntax errors for display with:
 1. The original input line
 2. A caret line (`^^^^^`) pointing to the error
 3. The error message
@@ -620,7 +688,9 @@ error: unclosed double quote
 
 ### 8.3 Caret Line Construction
 
-The caret line is built from the error's start and end positions:
+```go
+func buildCaretLine(start, end int) string
+```
 
 - Leading spaces align carets with the error position
 - Carets (`^`) span from `start` to `end`
@@ -695,13 +765,12 @@ Substitution bodies begin a fresh quote context. The enclosing depths are saved 
 
 `Depth` is defined PRECISELY as **the maximum nesting level reached within the token, across quote regions and command substitutions**. It is the high-water mark of the combined total depth (quoting.md §5.4) over the token's span.
 
-```
-# Keep a running total nesting level:
-#   +1 on every region open or nest (a quote OPEN or NEST, a $( , a
-#      backtick open or nest)
-#   -1 on every close
-# Record the per-token high-water mark:
-token_depth = MAX(token_depth, current_total_depth)
+```go
+// Maintain a running total nesting level:
+//   +1 on every region open or nest (quote OPEN/NEST, `$(`, backtick open/nest)
+//   -1 on every close
+// and record the per-token high-water mark:
+tokenDepth = max(tokenDepth, currentTotalDepth)
 ```
 
 | Token | Depth |
@@ -835,7 +904,7 @@ Future versions may add:
 - `TypeBuiltin` - Shell built-in commands
 - `TypeAlias` - User-defined aliases
 - `TypeFunction` - Shell function names
-- `TypeGlob` - Glob patterns (`*.txt`, `**/*.md`)
+- `TypeGlob` - Glob patterns (`*.txt`, `**/*.go`)
 - `TypeBraceExpansion` - Brace expansions (`{a,b,c}`)
 - `TypeArithmetic` - Arithmetic expressions (`$((1+2))`)
 - `TypeConditional` - Conditional expressions (`[[ ... ]]`)
@@ -900,11 +969,11 @@ Future enhancements may include:
 
 ---
 
-## Appendix B: Required Conformance Coverage
+## Appendix B: Test Coverage Summary
 
 A conformance suite MUST cover each behavior below.
 
-### Analysis
+### Analyzer Tests
 - Basic command parsing
 - Token position accuracy
 - All operator types
@@ -926,7 +995,7 @@ A conformance suite MUST cover each behavior below.
 - Command after semicolon
 - Lexer/analyzer validity cross-check (§7.1)
 
-### Highlighting
+### Highlighter Tests
 - Basic command highlighting
 - All operator highlighting
 - Redirection highlighting
@@ -945,7 +1014,7 @@ A conformance suite MUST cover each behavior below.
 - Whitespace handling
 - ANSI reset after each token
 
-### Diagnostics
+### Diagnostics Tests
 - Single error formatting
 - Multiple error formatting
 - Caret alignment
