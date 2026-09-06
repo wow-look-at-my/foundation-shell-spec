@@ -20,7 +20,7 @@ This document provides the exhaustive specification for Foundation Shell's chain
 6. [Operator Precedence and Associativity](#operator-precedence-and-associativity)
 7. [Combining Operators in Complex Chains](#combining-operators-in-complex-chains)
 8. [Error Cases](#error-cases)
-9. [Implementation Notes](#implementation-notes)
+9. [Evaluation Model](#evaluation-model)
 
 ---
 
@@ -49,9 +49,9 @@ command_1  operator_1  command_2  operator_2  ...  command_N
 
 - An exit code of `0` indicates **success**
 - Any non-zero exit code indicates **failure**
-- The exit code range is 0-255 (standard Unix convention; normative table in execution.md §Exit Codes)
+- The exit code range is 0-255, by the standard Unix convention. The normative table is execution.md §Exit Codes
 
-A command that fails to START — command not found (127), found but not executable (126), redirection target that fails to open (1) — yields its failure status to operator evaluation like any other non-zero exit. It NEVER aborts the chain (execution.md §Runtime Failures Never Abort the Chain):
+A command can fail to START. The cases are a command not found (127), a command found but not executable (126), and a redirection target that fails to open (1). Each yields its failure status to operator evaluation, like any other non-zero exit. It NEVER aborts the chain (execution.md §Runtime Failures Never Abort the Chain):
 
 ```bash
 nosuchcmd || echo fallback   # prints fallback; exit status 0
@@ -624,33 +624,24 @@ An empty command line or whitespace-only input is an error (for parse operations
 
 ---
 
-## Implementation Notes
+## Evaluation Model
 
 ### Internal Representation
 
-The parser produces a `Chain` structure:
+The parser produces a chain (parser.md):
 
-```go
-type Chain struct {
-    Commands  []*CommandSpec   // List of commands
-    Operators []token.TokenType // Operators between commands (len = len(Commands) - 1)
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Commands` | The commands, in input order |
+| `Operators` | The operators between them. A chain of N commands carries N−1 operators |
 
-### Token Types
+### Operator Names
 
-```go
-const (
-    Pipe      TokenType // |
-    And       TokenType // &&
-    Or        TokenType // ||
-    Semicolon TokenType // ;
-)
-```
+This file names the operator tokens `Pipe` (`|`), `And` (`&&`), `Or` (`||`), and `Semicolon` (`;`). The lexer's recognition rules for them are canonical in lexer.md §3.3.
 
 ### Execution Algorithm
 
-The decision whether a segment runs is made BEFORE executing it, from the operator that PRECEDES it and the current propagated status. A skipped segment preserves `lastStatus` unchanged, so the operator after a skipped segment is evaluated against the ORIGINAL status — `false && a && b` runs nothing and returns 1; `true || a || b` runs nothing and returns 0.
+The decision whether a segment runs is made BEFORE executing it, from the operator that PRECEDES it and the current propagated status. A skipped segment preserves `lastStatus` unchanged. The operator after a skipped segment is therefore evaluated against the ORIGINAL status. So `false && a && b` runs nothing and returns 1. Likewise `true || a || b` runs nothing and returns 0.
 
 ```
 function ExecuteChain(chain):
@@ -697,15 +688,15 @@ Result: no output, exit status 1
 Pipelines execute all commands concurrently (mechanics canonical in execution.md §Pipeline Execution):
 
 1. Create pipes between adjacent commands
-2. Launch all commands in goroutines
+2. Start every command at the same time
 3. Connect stdout[i] to stdin[i+1] via pipes
 4. When a command finishes, close BOTH of its pipe ends — an early-exiting consumer terminates its producer (`yes | head -1` must not hang)
 5. Wait for all commands to complete
 6. Return exit code of rightmost command
 
-### Thread Safety
+### Concurrent Writes to Stderr
 
-Stderr from concurrent pipeline commands is serialized through a synchronized writer to prevent output interleaving.
+The pipeline's commands share one stderr. That stderr MUST serialize each write, so no two messages interleave.
 
 ---
 
@@ -728,7 +719,7 @@ Foundation Shell operators follow POSIX shell semantics with these characteristi
 
 ### Future Considerations
 
-Potential future additions (not currently implemented):
+Potential future additions. This specification does not define them:
 
 - Background operator (`&`) — today a lone `&` word is a guarded parse error (parser.md §Background Execution Is Guarded)
 - Subshell grouping with `()`

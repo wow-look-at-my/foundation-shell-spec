@@ -8,8 +8,6 @@ recommend_after: quoting.md
 
 > **Canonical for:** the expansion pipeline — tilde expansion, variable expansion (including the special parameter `$?`), command substitution semantics, and expansion suppression. Quote *semantics* live in quoting.md; tokenization lives in lexer.md. The authority map lives in the README.
 
-Implementation: the foundation-shell repository; this specification is authoritative.
-
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -84,26 +82,24 @@ Input Token (TokenContext)
 Expanded Token
 ```
 
-### Reference Code
+### Reference Algorithm
 
-The parser applies the pipeline per token. `lastStatus` is the shell's last recorded command-line status (see [Special Parameters](#special-parameters) and execution.md §Last Exit Code), supplied by the shell for each parse:
+The parser applies the pipeline per token. `lastStatus` is the shell's last recorded command-line status (see [Special Parameters](#special-parameters) and execution.md §Last Exit Code). The shell supplies it for each parse:
 
-```go
-// For each value token tc (lexer.TokenContext):
-value := tc.Content
-if !tc.WasSingleQuoted {
-    if !tc.WasQuoted {
-        value = expander.ExpandTilde(value)
-    }
-    value = expander.ExpandEnvironment(value, lastStatus)
-    if executor != nil {
-        value, err = expander.ExpandCommandSubstitution(value, executor)
-        if err != nil {
-            return nil, fmt.Errorf("command substitution error: %w", err)
-        }
-    }
-}
-value = lexer.StripEscapeMarkers(value) // unconditional (parser.md §Step 3)
+```
+# For each value token tc:
+value = tc.Content
+
+if not tc.WasSingleQuoted:
+    if not tc.WasQuoted:
+        value = EXPAND_TILDE(value)
+    value = EXPAND_VARIABLES(value, lastStatus)
+    if a substitution executor is available:
+        value = EXPAND_COMMAND_SUBSTITUTION(value, executor)
+        # A failure here fails the parse, reported as
+        #   command substitution error: <reason>
+
+value = STRIP_ESCAPE_MARKERS(value)   # unconditional (parser.md §Step 3)
 ```
 
 Marker stripping is deliberately OUTSIDE the suppression block: a concatenation such as `'a'\$HOME` produces a `WasSingleQuoted` token that still carries a marker (lexer.md §11.3).
@@ -172,34 +168,26 @@ echo ~/"docs"     # Outputs: ~/docs     (whole-token granularity, see above)
 
 **Note:** `\~` does NOT produce a literal tilde. The escape `\X` removes the backslash and leaves a plain `~` with no marker (escape table, [Escape Sequences](#escape-sequences)), and the resulting token is unquoted — so it still tilde-expands. To pass a literal `~` as the start of an argument, quote it.
 
-### Reference Code
+### Reference Algorithm
 
-The `WasQuoted` check happens in the caller (see [Expansion Order](#expansion-order)); `ExpandTilde` itself only inspects the content:
+The caller performs the `WasQuoted` check (see [Expansion Order](#expansion-order)). Tilde expansion itself inspects only the content:
 
-```go
-func ExpandTilde(token string) string {
-    if len(token) == 0 || token[0] != '~' {
+```
+EXPAND_TILDE(token) -> string
+    if token is empty or its first rune is not ~ :
         return token
-    }
 
-    home := os.Getenv("HOME")
-    if home == "" {
+    home = the value of the HOME environment variable
+    if home is empty:
         return token
-    }
 
-    // Just "~"
-    if len(token) == 1 {
+    if token is exactly "~" :
         return home
-    }
 
-    // "~/..." - expand to home + rest
-    if token[1] == '/' {
-        return home + token[1:]
-    }
+    if the rune after the ~ is / :          # "~/..."
+        return home followed by the rest of the token
 
-    // "~user" or "~something" - leave unchanged
-    return token
-}
+    return token                            # "~user", "~something"
 ```
 
 ---
@@ -272,105 +260,77 @@ echo $Z    # Outputs: $HOME           - NOT re-expanded
 
 (Environment values containing a literal U+0001 byte fall under the reserved-marker caveat of lexer.md §5.1.4: undefined behavior.)
 
-### Reference Code
+### Reference Algorithm
 
-```go
-func ExpandEnvironment(token string, lastStatus int) string {
-    if !strings.Contains(token, "$") {
+The scan is byte-wise. `IS_NAME_START` accepts `_` and the ASCII letters. `IS_NAME_CHAR` accepts those plus the ASCII digits.
+
+```
+EXPAND_VARIABLES(token, lastStatus) -> string
+    if token holds no $ :
         return token
-    }
 
-    var result strings.Builder
-    i := 0
-    for i < len(token) {
-        // Check for escape marker before $
-        if i < len(token)-1 && token[i] == '\x01' && token[i+1] == '$' {
-            result.WriteString("\x01$") // still marked; stripped later
-            i += 2
+    result = empty
+    i = 0
+    while i < LENGTH(token):
+
+        if token[i] is \x01 and token[i+1] is $ :
+            append "\x01$"        # still marked, stripped later
+            i = i + 2
             continue
-        }
 
-        if token[i] != '$' {
-            result.WriteByte(token[i])
-            i++
+        if token[i] is not $ :
+            append token[i]
+            i = i + 1
             continue
-        }
 
-        // Handle $ at end of string
-        if i+1 >= len(token) {
-            result.WriteByte('$')
-            i++
+        if no byte follows the $ :
+            append "$"            # a lone trailing $ stays literal
+            i = i + 1
             continue
-        }
 
-        next := token[i+1]
+        next = token[i+1]
 
-        // Special parameter $? - last command-line status
-        if next == '?' {
-            result.WriteString(strconv.Itoa(lastStatus))
-            i += 2
+        if next is ? :            # the special parameter
+            append lastStatus as decimal text
+            i = i + 2
             continue
-        }
 
-        // Handle ${VAR} syntax
-        if next == '{' {
-            closeIdx := strings.Index(token[i+2:], "}")
-            if closeIdx == -1 {
-                result.WriteByte('$')
-                i++
+        if next is { :            # the ${NAME} form
+            if no } follows:
+                append "$"        # unclosed brace: literal text
+                i = i + 1
                 continue
-            }
-            varName := token[i+2 : i+2+closeIdx]
-            if varName == "" {
-                result.WriteString("${}")
-                i += 3
+            name = the bytes between the { and the }
+            if name is empty:
+                append "${}"      # empty braces stay literal
+                i = i + 3
                 continue
-            }
-            result.WriteString(markExpansionResult(os.Getenv(varName)))
-            i += 3 + closeIdx
+            append MARK(LOOKUP(name))
+            i = the index just past the }
             continue
-        }
 
-        // Handle $VAR syntax
-        if !isVarStartChar(next) {
-            result.WriteByte('$')
-            i++
+        if not IS_NAME_START(next) :
+            append "$"            # a $ before anything else is literal
+            i = i + 1
             continue
-        }
 
-        // Find end of variable name (greedy)
-        varStart := i + 1
-        varEnd := varStart
-        for varEnd < len(token) && isVarChar(token[varEnd]) {
-            varEnd++
-        }
-        result.WriteString(markExpansionResult(os.Getenv(token[varStart:varEnd])))
-        i = varEnd
-    }
+        name = the longest run of IS_NAME_CHAR bytes after the $
+        append MARK(LOOKUP(name))
+        i = the index just past that run
 
-    return result.String()
-}
+    return result
 
-// markExpansionResult escape-marks every $ and ` in a spliced value so the
-// command substitution step treats them as literal text (values are data).
-func markExpansionResult(s string) string {
-    s = strings.ReplaceAll(s, "$", "\x01$")
-    return strings.ReplaceAll(s, "`", "\x01`")
-}
 
-func isVarStartChar(c byte) bool {
-    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-func isVarChar(c byte) bool {
-    return c == '_' ||
-        (c >= 'a' && c <= 'z') ||
-        (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9')
-}
+MARK(value) -> string
+    # Escape-mark every $ and ` in a spliced value, so the command
+    # substitution step treats them as literal text. Values are data.
+    replace each $ with \x01$
+    replace each ` with \x01`
 ```
 
-Note that `isVarChar` is byte-wise ASCII by design: applying Unicode classification to single bytes would half-consume multi-byte UTF-8 sequences. A reference such as `$Aé` scans the name `A` and leaves `é` as literal text.
+`LOOKUP` reads the environment. An unset name yields the empty string.
+
+The name scan is byte-wise ASCII by design. Unicode classification applied to single bytes half-consumes a multi-byte UTF-8 sequence. A reference such as `$Aé` therefore scans the name `A` and leaves `é` as literal text.
 
 ---
 
@@ -396,7 +356,7 @@ A shell that re-scans substitution output executes data as code. Foundation Shel
 
 ### Recursive Execution
 
-The lexer preserves substitution bodies verbatim — embedded whitespace, quotes, escapes, operators, and nested substitutions all stay in the token (lexer.md §7.1). When a substitution is expanded, its body is handed to the executor, which re-parses it **recursively with the same parser and the same executor** (`ParseWithExecutor(body, executor)` — see execution.md §Command Substitution Executor).
+The lexer preserves substitution bodies verbatim — embedded whitespace, quotes, escapes, operators, and nested substitutions all stay in the token (lexer.md §7.1). When a substitution is expanded, its body is handed to the executor, which re-parses it **recursively with the same parser and the same executor** (execution.md §Command Substitution Executor).
 
 Consequences:
 
@@ -444,72 +404,50 @@ echo before $(nosuchcmd) after
 
 ### Executor Interface
 
-```go
-// SubstitutionExecutor executes a command substitution body.
-// (Renamed from SubshellExecutor; "subshell" is reserved for future
-// `()` grouping.)
-type SubstitutionExecutor interface {
-    Execute(command string) (output string, exitCode int, err error)
-}
+A substitution executor takes one command-substitution body as a string. It yields three results: the captured output, the body's exit status, and an error indication. The name is deliberate. "Subshell" is reserved for the future `()` grouping construct.
+
+Command substitution occurs only when a parse is given an executor. A parse without one preserves substitutions as literal text (parser.md §Public API). The executor's execution model — same process, captured stdout, shared environment — is specified in execution.md §Command Substitution Executor.
+
+### Reference Algorithm
+
+The scan is rune-based. The output buffer is NEVER re-scanned.
+
 ```
+EXPAND_COMMAND_SUBSTITUTION(token, executor) -> string
+    out = empty
+    i = 0
+    while i < LENGTH(runes):
 
-Command substitution only occurs when an executor is provided during parsing (`ParseWithExecutor`). With `Parse` (nil executor), substitutions are preserved as literal text (parser.md §Public API). The executor's execution model — same process, captured stdout, shared environment — is specified in execution.md §Command Substitution Executor.
-
-### Reference Code
-
-```go
-func ExpandCommandSubstitution(token string, executor SubstitutionExecutor) (string, error) {
-    if executor == nil {
-        return "", errors.New("executor cannot be nil")
-    }
-
-    runes := []rune(token)
-    var out strings.Builder // out is NEVER re-scanned
-    i := 0
-    for i < len(runes) {
-        // Escape-marked character: copy verbatim, never an opener
-        if runes[i] == EscapeMarker && i+1 < len(runes) {
-            out.WriteRune(runes[i])
-            out.WriteRune(runes[i+1])
-            i += 2
+        if runes[i] is ESCAPE_MARKER and a rune follows:
+            append both runes verbatim     # never an opener
+            i = i + 2
             continue
-        }
 
-        // $( ... )
-        if runes[i] == '$' && i+1 < len(runes) && runes[i+1] == '(' {
-            end := findMatchingParen(runes, i+2) // body-quote-state aware
-            body := string(runes[i+2:end])
-            output, _, err := executor.Execute(body) // exit status discarded
-            if err != nil {
-                return "", err
-            }
-            out.WriteString(strings.TrimRight(output, "\n"))
+        if runes[i] is $ and the next rune is ( :
+            end  = FIND_MATCHING_PAREN(runes, i+2)
+            body = the runes between them
+            output = executor runs body    # its exit status is discarded
+            append output with its trailing newlines removed
             i = end + 1
             continue
-        }
 
-        // ` ... `
-        if runes[i] == '`' {
-            end := findClosingBacktick(runes, i+1) // body-quote-state aware
-            body := string(runes[i+1:end])
-            output, _, err := executor.Execute(body) // exit status discarded
-            if err != nil {
-                return "", err
-            }
-            out.WriteString(strings.TrimRight(output, "\n"))
+        if runes[i] is a backtick:
+            end  = FIND_CLOSING_BACKTICK(runes, i+1)
+            body = the runes between them
+            output = executor runs body    # its exit status is discarded
+            append output with its trailing newlines removed
             i = end + 1
             continue
-        }
 
-        out.WriteRune(runes[i])
-        i++
-    }
+        append runes[i]
+        i = i + 1
 
-    return out.String(), nil
-}
+    return out
 ```
 
-`findMatchingParen` and `findClosingBacktick` implement [Locating the Delimiters](#locating-the-delimiters): they track the body's own quote state (quoting.md §5.2) and skip backslash- and marker-escaped characters, exactly as the lexer's scan did (lexer.md §10.2).
+A failure reported by the executor aborts the expansion and propagates.
+
+`FIND_MATCHING_PAREN` and `FIND_CLOSING_BACKTICK` are [Locating the Delimiters](#locating-the-delimiters). Each tracks the body's own quote state (quoting.md §5.2). Each skips a backslash-escaped and a marker-escaped character, exactly as the scan did (lexer.md §10.2).
 
 ### Examples
 

@@ -8,8 +8,6 @@ recommend_after: operators.md
 
 > **Canonical for:** I/O redirection — operators, targets and their expansion, file semantics, redirection error handling and messages. Redirection *tokenization* is specified in lexer.md §3.3; the expansion pipeline in expansion.md. The authority map lives in the README.
 
-Implementation: the foundation-shell repository; this specification is authoritative.
-
 ## 1. Overview
 
 I/O redirection allows commands to read input from files instead of stdin and write output to files instead of stdout or stderr. Foundation Shell supports standard UNIX-style redirection operators for input, output, and error streams.
@@ -89,9 +87,9 @@ cat < input.txt
 wc -l < data.csv
 ```
 
-**Implementation Details:**
-- Uses `os.Open()` with read-only mode
-- File must exist and be readable
+**Details:**
+- The file is opened read-only
+- The file must exist and be readable
 - File is opened before command execution begins
 - File is closed after command completes
 
@@ -114,10 +112,10 @@ echo "hello" > output.txt
 ls -la > directory_listing.txt
 ```
 
-**Implementation Details:**
-- Uses `os.OpenFile()` with flags: `O_WRONLY | O_CREATE | O_TRUNC`
-- Creates file with permissions `0644` if it does not exist
-- Existing file contents are destroyed
+**Details:**
+- The file is opened write-only. It is created if it is absent, and truncated if it is present
+- A created file is requested with mode `0644` (§8.2)
+- The previous contents of an existing file are destroyed
 
 ### 3.3 Output Redirection (Append): `>> file`
 
@@ -141,10 +139,10 @@ echo "line 2" >> log.txt
 # line 2
 ```
 
-**Implementation Details:**
-- Uses `os.OpenFile()` with flags: `O_WRONLY | O_CREATE | O_APPEND`
-- Creates file with permissions `0644` if it does not exist
-- File pointer is positioned at end of file before each write
+**Details:**
+- The file is opened write-only in append mode. It is created if it is absent
+- A created file is requested with mode `0644` (§8.2)
+- Each write goes to the end of the file
 
 ### 3.4 Error Redirection (Truncate): `2> file`
 
@@ -165,10 +163,10 @@ ls /nonexistent 2> errors.txt
 make 2> build_errors.log
 ```
 
-**Implementation Details:**
-- Uses `os.OpenFile()` with flags: `O_WRONLY | O_CREATE | O_TRUNC`
-- Creates file with permissions `0644` if it does not exist
-- The `2` and `>` MUST NOT be separated by whitespace (parsed as single token `2>`)
+**Details:**
+- The file is opened write-only. It is created if it is absent, and truncated if it is present
+- A created file is requested with mode `0644` (§8.2)
+- Whitespace MUST NOT separate the `2` from the `>`. The lexer reads `2>` as one token
 
 ### 3.5 Error Redirection (Append): `2>> file`
 
@@ -190,10 +188,10 @@ command2 2>> errors.log
 # All errors accumulated in errors.log
 ```
 
-**Implementation Details:**
-- Uses `os.OpenFile()` with flags: `O_WRONLY | O_CREATE | O_APPEND`
-- Creates file with permissions `0644` if it does not exist
-- The `2` and `>>` MUST NOT be separated by whitespace (parsed as single token `2>>`)
+**Details:**
+- The file is opened write-only in append mode. It is created if it is absent
+- A created file is requested with mode `0644` (§8.2)
+- Whitespace MUST NOT separate the `2` from the `>>`. The lexer reads `2>>` as one token
 
 ---
 
@@ -372,10 +370,7 @@ Newly created files are assigned permissions `0644`:
 | Group      | Read only (4)                     |
 | Others     | Read only (4)                     |
 
-**Implementation:**
-```go
-os.OpenFile(path, flags, 0644)
-```
+A file the shell creates is therefore requested with mode `0644`. The process file-creation mask applies to it as usual.
 
 ### 8.3 Parent Directory Requirements
 
@@ -613,20 +608,18 @@ A single-quoted target (`WasSingleQuoted`) skips steps 1–3 entirely (§10.3). 
 
 ## 11. Internal Representation
 
-### 11.1 CommandSpec Structure
+### 11.1 Command Structure
 
-Each parsed command is represented as a `CommandSpec`:
+Each parsed command carries these fields (parser.md):
 
-```go
-type CommandSpec struct {
-    Args         []string  // Command name and arguments
-    InputFile    string    // Target for < redirection (empty if none)
-    OutputFile   string    // Target for > or >> redirection (empty if none)
-    ErrorFile    string    // Target for 2> or 2>> redirection (empty if none)
-    AppendOutput bool      // true for >>, false for >
-    AppendError  bool      // true for 2>>, false for 2>
-}
-```
+| Field | Meaning |
+|-------|---------|
+| `Args` | The command name and its arguments |
+| `InputFile` | The target of a `<` redirection. Empty when there is none |
+| `OutputFile` | The target of a `>` or `>>` redirection. Empty when there is none |
+| `ErrorFile` | The target of a `2>` or `2>>` redirection. Empty when there is none |
+| `AppendOutput` | True for `>>`, false for `>` |
+| `AppendError` | True for `2>>`, false for `2>` |
 
 ### 11.2 Token Types
 
@@ -655,19 +648,12 @@ Redirection operators are recognized as distinct token types:
 
 ### 12.2 File Handle Cleanup
 
-All file handles are closed after command completion, regardless of:
-- Command success or failure
-- Signal interruption
-- Exception/panic
+Every opened file closes after the command completes. This holds in each case:
+- The command succeeded or failed
+- A signal interrupted the command
+- An internal failure ended the command
 
-**Implementation uses `defer`:**
-```go
-defer func() {
-    for _, f := range filesToClose {
-        f.Close()
-    }
-}()
-```
+The close MUST be unconditional. It cannot depend on the path the command took out of execution.
 
 ### 12.3 Builtin Commands
 
