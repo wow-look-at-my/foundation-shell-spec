@@ -194,7 +194,7 @@ cmd_a & cmd_b arg     # ONE command: cmd_a with args [&, cmd_b, arg].
                       # cmd_b never runs, and nothing says so
 ```
 
-Both outcomes are worse than the `2>&1` trap §9.5 already guards against: that one creates a stray file, this one hangs the shell or silently drops half the line. The parser rejects it for the same reason.
+Both outcomes are worse than the `2>&1` trap that §9.5 already guards against. That one creates a stray file. This one hangs the shell, or silently drops half the line. The parser rejects it for the same reason.
 
 **Behavior:**
 - Parse error: `background execution is not supported`
@@ -208,21 +208,21 @@ $ echo 'a & b'        # OK: quoted
 $ echo "u?x=1&y=2"    # OK: & inside a longer word
 ```
 
-A caller that wants a command to outlive the shell runs it under a tool that owns that job — `nohup`, a supervisor, or the caller's own process manager.
+A caller can want a command to outlive the shell. That caller runs it under a tool built for the job, such as `nohup`, a supervisor, or its own process manager.
 
 #### Assignment Then Use Is Guarded
 
 **Condition:** A command expands `$NAME` when an EARLIER command in the same input assigned `NAME`.
 
-The whole input expands in one pass before any of it runs, so the expansion reads the value from before the input (expansion.md §Assignment Is Not Visible to the Same Input). Unguarded, `OUT=$(cmd); echo $OUT` prints an empty line and reports success — the one construct here that corrupts a result rather than stopping the caller.
+The whole input expands in one pass before any of it runs. The expansion therefore reads the value from before the input (expansion.md §Assignment Is Not Visible to the Same Input). Unguarded, `OUT=$(cmd); echo $OUT` prints an empty line and reports success. It is the one construct here that corrupts a result rather than stopping the caller.
 
 **Behavior:**
 - Parse error: `variable is assigned and used in the same input: <name>`
-- Commands are walked in order, and each command's references are tested against what EARLIER commands assigned, so a word never counts as referencing its own assignment (`X=$X` is legal)
+- Commands are walked in order. Each command's references are tested against what EARLIER commands assigned. A word therefore never counts as referencing its own assignment, and `X=$X` is legal
 - Two forms arm the guard, because both mutate the shell and both are equally invisible to a later expansion: a standalone `NAME=VALUE` (§Standalone Assignment) and `export NAME=VALUE`
 - Redirection targets are checked with the command's words: `> $OUT` picks a filename, so a stale one is worse than a stale argument
 - A single-quoted reference is NOT a reference: `sh -c 'echo $X'` hands `$X` to the child, which resolves it against the environment the assignment really did set
-- Unlike the guards above, this one has no analyzer counterpart — the analyzer does not model expansion — so it prints as a plain `parse error:` line rather than a caret block (diagnostics.md §5.2)
+- This guard has no analyzer counterpart, because the analyzer does not model expansion. It therefore prints as a plain `parse error:` line rather than a caret block (diagnostics.md §5.2)
 
 ```bash
 $ OUT=$(echo hi) ; echo $OUT
@@ -234,7 +234,7 @@ $ echo $X ; X=hi               # OK: the use precedes the assignment
 
 #### Trailing Semicolon
 
-A trailing `;` is VALID. The parser CONSUMES it: it does not appear in `Chain.Operators`, so the invariant `len(Operators) == len(Commands) - 1` is preserved.
+A trailing `;` is VALID. The parser CONSUMES it. It never appears in `Chain.Operators`. The N−1 operator invariant is therefore preserved.
 
 ```
 Input:  "echo hi ;"
@@ -380,7 +380,7 @@ Parses input without command substitution expansion.
 func ParseWithExecutor(input string, executor expander.SubstitutionExecutor) (*Chain, error)
 ```
 
-(`SubstitutionExecutor` is the renamed `SubshellExecutor`; "subshell" is reserved for future `()` grouping.)
+The name `SubstitutionExecutor` is deliberate. "Subshell" is reserved for the future `()` grouping construct.
 
 Parses input with optional command substitution expansion.
 
@@ -526,7 +526,7 @@ The parser uses three expansion functions:
 2. `expander.ExpandEnvironment(value, lastStatus)` - Expand `$VAR`, `${VAR}`, and `$?`
 3. `expander.ExpandCommandSubstitution(value, executor)` - Expand `$(...)` and backticks
 
-`lastStatus` is the shell's last recorded command-line status, supplied to the parser for every parse so that `$?` can expand (expansion.md §Special Parameters; execution.md §Last Exit Code).
+`lastStatus` is the shell's last recorded command-line status, supplied to the parser for every parse so that `$?` can expand (expansion.md §Special Parameters, execution.md §Last Exit Code).
 
 ## Semantic Classification
 
@@ -553,7 +553,7 @@ REDIR_OP    := '<' | '>' | '>>' | '2>' | '2>>'
 word        := any value token (lexer.md §2.3)
 ```
 
-Every command contains at least one word — the grammar itself excludes redirection-only commands (`> file`), which the validator reports as `ErrEmptyCommand`. The optional final `;` is the consumed trailing semicolon. `word` is a lexer value token (a `TokenContext` with `IsOperator: false`); there is no separate quoted-string token type — quoting is resolved by the lexer before classification.
+Every command contains at least one word — the grammar itself excludes redirection-only commands (`> file`), which the validator reports as `ErrEmptyCommand`. The optional final `;` is the consumed trailing semicolon. `word` is a lexer value token, which is a `TokenContext` with `IsOperator: false`. No separate quoted-string token type exists. The lexer resolves quoting before classification.
 
 ## Testing Considerations
 
@@ -562,8 +562,8 @@ Every command contains at least one word — the grammar itself excludes redirec
 - Single command
 - Multiple commands with pipes
 - Conditional operators (&&, ||)
-- Sequential execution (;)
-- Trailing semicolon (consumed; not in Chain.Operators)
+- Sequential execution with the semicolon operator
+- Trailing semicolon, which is consumed and never appears in Chain.Operators
 - Redirection combinations
 - Mixed operators
 - Quoted arguments (single and double)

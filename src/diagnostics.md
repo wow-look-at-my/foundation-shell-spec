@@ -14,7 +14,7 @@ This document is the exhaustive specification for Foundation Shell's diagnostic 
 
 ## 1. Overview of Diagnostic System
 
-The diagnostic system provides human-readable error output for syntax errors detected during shell input analysis. It is implemented in the `syntax` package and consists of:
+The diagnostic system provides human-readable error output for syntax errors detected during shell input analysis. It consists of:
 
 1. **SyntaxError** - A struct containing error position and message
 2. **FormatDiagnostics** - Formats errors for display to users
@@ -87,6 +87,7 @@ error: unclosed double quote
 ### 2.4 Complete Single Error Example
 
 Input: `echo "hello`
+
 Error: Start=5, End=11, Message="unclosed double quote"
 
 Output:
@@ -269,7 +270,7 @@ The parser reports these exact strings (the `<...>` placeholders are filled with
 - All messages are lowercase
 - Operator symbols in messages use the exact characters: `$(...)`
 - No trailing punctuation
-- The parser appends `: <op>` context to its operator errors; the analyzer's trailing-operator message carries no suffix (the caret already points at the operator)
+- The parser appends `: <op>` context to its operator errors. The analyzer's trailing-operator message carries no suffix, because its caret already points at the operator
 
 ---
 
@@ -466,7 +467,7 @@ echo 'it
 error: unclosed single quote
 ```
 
-(Note: `echo 'it's` would be VALID — the `'` in `it's` is attached to text on both sides, so it CLOSES the region (quoting.md §5.2); the command prints `its`. An even quote count alone proves nothing: `echo 'a 'b` has two quotes and is still unclosed, because the second one NESTS.)
+(Note: `echo 'it's` is VALID. The `'` in `it's` is attached to text on both sides, so it CLOSES the region (quoting.md §5.2). The command prints `its`. An even quote count alone proves nothing. The input `echo 'a 'b` has an even count and is still unclosed, because its second quote NESTS.)
 
 ### 8.4 Unclosed Double Quote
 
@@ -537,7 +538,7 @@ error: unclosed command substitution $(...)
 
 When input is empty but an error is provided:
 - Line 1 will be empty
-- Line 2 may contain carets (implementation-dependent for edge positions)
+- Line 2 may contain carets. This specification does not fix their placement for an edge position
 - Line 3 contains the error message
 
 ### 9.2 Error Position Beyond Input

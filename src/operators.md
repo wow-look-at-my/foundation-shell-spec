@@ -49,9 +49,9 @@ command_1  operator_1  command_2  operator_2  ...  command_N
 
 - An exit code of `0` indicates **success**
 - Any non-zero exit code indicates **failure**
-- The exit code range is 0-255 (standard Unix convention; normative table in execution.md §Exit Codes)
+- The exit code range is 0-255, by the standard Unix convention. The normative table is execution.md §Exit Codes
 
-A command that fails to START — command not found (127), found but not executable (126), redirection target that fails to open (1) — yields its failure status to operator evaluation like any other non-zero exit. It NEVER aborts the chain (execution.md §Runtime Failures Never Abort the Chain):
+A command can fail to START. The cases are a command not found (127), a command found but not executable (126), and a redirection target that fails to open (1). Each yields its failure status to operator evaluation, like any other non-zero exit. It NEVER aborts the chain (execution.md §Runtime Failures Never Abort the Chain):
 
 ```bash
 nosuchcmd || echo fallback   # prints fallback; exit status 0
@@ -650,7 +650,7 @@ const (
 
 ### Execution Algorithm
 
-The decision whether a segment runs is made BEFORE executing it, from the operator that PRECEDES it and the current propagated status. A skipped segment preserves `lastStatus` unchanged, so the operator after a skipped segment is evaluated against the ORIGINAL status — `false && a && b` runs nothing and returns 1; `true || a || b` runs nothing and returns 0.
+The decision whether a segment runs is made BEFORE executing it, from the operator that PRECEDES it and the current propagated status. A skipped segment preserves `lastStatus` unchanged. The operator after a skipped segment is therefore evaluated against the ORIGINAL status. So `false && a && b` runs nothing and returns 1. Likewise `true || a || b` runs nothing and returns 0.
 
 ```
 function ExecuteChain(chain):
@@ -705,7 +705,7 @@ Pipelines execute all commands concurrently (mechanics canonical in execution.md
 
 ### Thread Safety
 
-Stderr from concurrent pipeline commands is serialized through a synchronized writer to prevent output interleaving.
+Stderr from concurrent pipeline commands is serialized through a synchronized writer, so no two messages interleave.
 
 ---
 
@@ -728,7 +728,7 @@ Foundation Shell operators follow POSIX shell semantics with these characteristi
 
 ### Future Considerations
 
-Potential future additions (not currently implemented):
+Potential future additions. This specification does not define them:
 
 - Background operator (`&`) — today a lone `&` word is a guarded parse error (parser.md §Background Execution Is Guarded)
 - Subshell grouping with `()`

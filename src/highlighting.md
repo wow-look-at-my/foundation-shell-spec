@@ -6,7 +6,7 @@ recommend_after: execution.md
 
 # Foundation Shell Syntax Highlighting Specification
 
-> **Canonical for:** the syntax analyzer, semantic token types, the theme system, and REPL highlighting. The authority map lives in the README. (Implementation: `src/internal/syntax/` in the foundation-shell repository.)
+> **Canonical for:** the syntax analyzer, semantic token types, the theme system, and REPL highlighting. The authority map lives in the README.
 
 ---
 
@@ -34,14 +34,14 @@ Foundation Shell provides real-time syntax highlighting for interactive shell in
 
 2. **Semantic Token Types**: Highlighting is based on semantic meaning, not colors. Token types (e.g., `TypeCommand`, `TypeOperator`) are decoupled from visual presentation, allowing themes to customize appearance.
 
-3. **Real-Time Feedback**: Highlighting updates on every keystroke via the readline `Painter` interface, providing immediate visual feedback including error highlighting for invalid syntax.
+3. **Real-Time Feedback**: highlighting updates on every keystroke, through the line editor's painting hook (§6.1). The user gets immediate visual feedback, with invalid syntax marked as it is typed.
 
 ### System Components
 
 ```mermaid
 flowchart TD
     Input[User Input]
-    Painter[readline<br>Painter Interface]
+    Painter[Line editor<br>Painting hook]
     Analyze[Analyze&lpar;&rpar;<br>Single Source of Truth]
     Result[AnalysisResult<br>• Tokens&lbrack;&rbrack;<br>• Errors&lbrack;&rbrack;<br>• Valid bool]
     Highlighter[Highlighter<br>Apply Theme]
@@ -85,7 +85,7 @@ const (
 )
 ```
 
-(`TypeCommandSubst` was formerly named `TypeSubshell`; it was renamed because `$(...)` is command substitution — "subshell" is reserved for future `( ... )` command grouping.)
+The name `TypeCommandSubst` is deliberate, because `$(...)` is command substitution. "Subshell" is reserved for the future `( ... )` grouping construct.
 
 #### AnalyzedToken
 
@@ -153,7 +153,7 @@ func (h *Highlighter) HighlightResult(input string) (string, []SyntaxError)
 
 ## 3. Semantic Token Types
 
-Each token type represents a specific semantic meaning in shell syntax. Token types are color-agnostic; visual presentation is determined by the theme.
+Each token type represents a specific semantic meaning in shell syntax. Token types are color-agnostic. The theme decides the visual presentation.
 
 ### 3.1 TypeCommand
 
@@ -255,7 +255,7 @@ cat < input.txt     # "input.txt" is TypeRedirectionTarget
 - Single quotes do NOT interpret escape sequences
 - Single quotes do NOT expand variables
 
-**Depth Tracking:** Single quotes use the open/nest/close depth rule (§9.2; canonical: quoting.md §5.2). A region still open at end of input is an unclosed-quote error — possible even with an even quote count.
+**Depth Tracking:** Single quotes use the open/nest/close depth rule (§9.2, canonical in quoting.md §5.2). A region still open at end of input is an unclosed-quote error — possible even with an even quote count.
 
 **Examples:**
 ```sh
@@ -297,7 +297,7 @@ echo "hello                  # TypeError (region still open at end of input)
 - Content between backticks is executed as a command
 - The result replaces the backtick expression
 
-**Depth Tracking:** Backticks use the same open/nest/close depth rule (§9.2); nested backticks execute recursively (quoting.md §6.3).
+**Depth Tracking:** Backticks use the same open/nest/close depth rule (§9.2). Nested backticks execute recursively (quoting.md §6.3).
 
 **Context Rules:**
 - Backticks are NOT recognized inside single quotes
@@ -339,7 +339,7 @@ echo $(unclosed              # TypeError (unbalanced parens)
 **Definition:** Variable references.
 
 **Recognition Rules:**
-- A `$` starts a variable token ONLY when the next character is a letter (a-z, A-Z), an underscore, `{`, or `?`: `$VAR`, `$_var`, `${HOME}`, and the special parameter `$?` (expansion.md §Special Parameters)
+- A `$` starts a variable token ONLY when a letter (a-z, A-Z), an underscore, `{`, or `?` follows it. The forms are `$VAR`, `$_var`, `${HOME}`, and the special parameter `$?` (expansion.md §Special Parameters)
 - `$(` starts a command substitution instead (§3.9)
 - Any other `$` (followed by a digit, punctuation, whitespace, or end of input) is a literal character within the word — `$1`, `$-foo`, and a trailing `$` are NOT variables
 
@@ -364,7 +364,7 @@ echo $1                  # "$1" is TypeArgument ($ + digit cannot start a name)
 
 **Recognition Rules:**
 - Single `(` or `)` character not belonging to a `$(...)` substitution
-- Reserved for command grouping — a FUTURE feature (operators.md); today such input does not execute
+- Reserved for command grouping, which is a FUTURE feature (operators.md). Such input does not execute today
 
 **Examples:**
 ```sh
@@ -408,7 +408,7 @@ echo    hello            # Multiple spaces "   " is TypeWhitespace
 
 **Definition:** Default/fallback type for unclassified tokens.
 
-**Usage:** Should rarely appear in practice. Indicates a gap in the analyzer.
+**Usage:** this type must not appear in practice. Its presence indicates a gap in the analyzer.
 
 ---
 
@@ -422,9 +422,9 @@ func Analyze(input string) *AnalysisResult
 
 `Analyze` does NOT tokenize. `Scan` does (quoting.md §1.3), and `Analyze` is one of its two views: it calls `Scan` once and then
 
-1. classifies each token semantically, from the structural role the scanner already assigned;
-2. carries through the positions and nesting depths the scanner recorded;
-3. reports every unterminated construct the scanner found; and
+1. classifies each token semantically, from the structural role the scanner already assigned
+2. carries through the positions and nesting depths the scanner recorded
+3. reports every unterminated construct the scanner found
 4. renders the problems `Validate` reports, which is the same rule set the parser rejects on.
 
 That division is the point. Highlighting cannot disagree with execution about what a token is, because it is not deciding.
@@ -437,11 +437,11 @@ The analyzer holds NO scanning state. Quote depths, the substitution stack, the 
 
 1. **Scan once.** `Scan(input)` returns the tokens and the list of unterminated constructs.
 
-2. **Locate the unclosed word.** An unterminated construct swallows the rest of the input, so only the LAST word can carry one; it is typed `TypeError`.
+2. **Locate the unclosed word.** An unterminated construct swallows the rest of the input. Only the LAST word can carry one. That word is typed `TypeError`.
 
-3. **Classify each token** (§4.5). Whitespace, comments and operators map directly; a word's type comes from its scanner-assigned role and its written form.
+3. **Classify each token** (§4.5). Whitespace, comments and operators map directly. A word's type comes from its scanner-assigned role and its written form.
 
-4. **Report.** Every unterminated construct becomes an error at the word's span, innermost first (§9.2), followed by the problems `Validate` reports — the same rule set the parser rejects on, rendered with this surface's wording (diagnostics.md §5.1).
+4. **Report.** Every unterminated construct becomes an error at the word's span, innermost first (§9.2). The structural problems follow. They come from the same rule set the parser rejects on, rendered with this surface's wording (diagnostics.md §5.1).
 
 ### 4.4 Operator Matching
 
@@ -458,7 +458,7 @@ After parsing a word, its type is determined by:
 3. **Quoted String:** If the ENTIRE word is wrapped in one matching quote pair, return the appropriate string type. A word that mixes quote styles or has unquoted parts (e.g. `'a'"b"`) is NOT a string type and falls through
 4. **Command Substitution:** If the word matches the `$(...)` pattern, return TypeCommandSubst
 5. **Variable:** If the word starts with `$` followed by a letter, underscore, or `{` (§3.10), return TypeVariable
-6. **Command vs Argument:** From the scanner's role — `RoleCommand` returns TypeCommand, otherwise TypeArgument. The analyzer does not re-derive which word starts a command; the parser reads the same role to build the chain.
+6. **Command vs Argument:** the scanner's role decides. `RoleCommand` gives TypeCommand, and every other role gives TypeArgument. The analyzer does not re-derive which word starts a command. The parser reads that same role to build the chain.
 
 ---
 
@@ -549,9 +549,9 @@ func (h *Highlighter) applyTheme(tokens []AnalyzedToken) string {
 
 ## 6. REPL Integration
 
-### 6.1 readline Painter Interface
+### 6.1 The Painter Interface
 
-Foundation Shell integrates with the `github.com/chzyer/readline` library using its `Painter` interface:
+The interactive line editor calls a painter on every keystroke:
 
 ```go
 type Painter interface {
@@ -590,7 +590,7 @@ rl, _ := readline.NewEx(cfg)
 
 ### 6.4 Real-Time Highlighting
 
-The `Paint` method is called by readline on every keystroke, providing:
+The `Paint` method is called on every keystroke. This gives:
 - Immediate visual feedback
 - Real-time error highlighting
 - Consistent highlighting as the user types
@@ -615,9 +615,9 @@ The same `Analyze()` function is used for BOTH:
 
 This ensures that any syntax error visible in highlighting is also reported as a diagnostic error, and vice versa.
 
-The promise extends across components: analysis and execution MUST accept exactly the same inputs — an input `Analyze` marks valid must tokenize without error, and one it rejects must fail tokenization.
+The promise extends across components. Analysis and execution MUST accept exactly the same inputs. An input the analysis marks valid must tokenize without error. An input it rejects must fail tokenization.
 
-This now holds by construction rather than by agreement. Both are views of a single `Scan` (quoting.md §1.3): the tokens come from one pass, and the structural rules from one `Validate`, so there is no second implementation to drift. The conformance suite MUST still cross-check it (for every corpus input, `Tokenize` errors if and only if `Analyze().Valid` is false), because the two views still differ in what they DO with a scan — the projection could lose a token, or a renderer could mislabel one.
+This now holds by construction rather than by agreement. Both are views of a single scan (quoting.md §1.3). The tokens come from one pass, and the structural rules from one validation. No second scanner exists to drift. The conformance suite MUST still cross-check the promise. For every corpus input, tokenization fails if and only if the analysis result is invalid. The two views still differ in what they DO with a scan. A projection can lose a token. A renderer can mislabel one.
 
 ### 7.2 Error Detection
 
@@ -698,7 +698,7 @@ func buildCaretLine(start, end int) string
 
 ### 8.4 Multi-Error Handling
 
-Multiple errors are displayed sequentially, with a blank line between blocks (diagnostics.md §7). Both messages use the canonical strings. Note that one unclosed construct usually swallows the rest of the line (a `'` inside open double quotes is literal and cannot produce a second error); two errors require two independently unclosed constructs, e.g. an unclosed substitution containing an unclosed quote:
+Multiple errors are displayed sequentially, with a blank line between blocks (diagnostics.md §7). Both messages use the canonical strings. One unclosed construct usually swallows the rest of the line. A `'` inside open double quotes is literal. It cannot make a second error. Two errors need two independently unclosed constructs. One example is an unclosed substitution that contains an unclosed quote:
 
 ```
 echo $(foo "bar
@@ -730,21 +730,21 @@ The diagnostics system handles:
 
 ### 9.1 Purpose
 
-Depth tracking implements Foundation Shell's flagship non-POSIX feature: whitespace-delimited quote NESTING (quoting.md §5.2, §6). The depth on each token comes from the scanner, which applies the open/nest/close rule once for execution and analysis alike — quoting.md §5 is the canonical statement. Unlike traditional shells, where a same-type quote character always closes, Foundation Shell lets it open an interior region; the depth counters track exactly that.
+Depth tracking implements Foundation Shell's flagship non-POSIX feature: whitespace-delimited quote NESTING (quoting.md §5.2, §6). The depth on each token comes from the scanner. The scanner applies the open/nest/close rule once, for execution and analysis alike. The canonical statement is quoting.md §5. In a traditional shell a same-type quote character always closes. Here it can open an interior region instead. The depth counters track exactly that.
 
 ### 9.2 Depth Counting Rules
 
 For each quote type (single, double, backtick) the analyzer keeps an open-region depth counter (quoting.md §5.1) driven by the rule (quoting.md §5.2):
 
 - **Depth 0:** an active, unescaped quote character always OPENS its region (depth → 1).
-- **Depth ≥ 1:** a same-type quote character NESTS one level (depth+1) iff the previous rune is whitespace AND a next rune exists that is neither whitespace nor any quote character (`'`, `"`, `` ` ``); otherwise it CLOSES one level (depth−1).
-- Valid input has every counter at 0 at end of input; a positive counter is an unclosed region (canonical strings — diagnostics.md §5).
+- **Depth ≥ 1:** a same-type quote character NESTS one level (depth+1) under two conditions. The previous rune is whitespace, AND a next rune exists that is neither whitespace nor any quote character (`'`, `"`, `` ` ``). Otherwise it CLOSES one level (depth−1).
+- Valid input has every counter at 0 at end of input. A positive counter is an unclosed region, reported with the canonical string (diagnostics.md §5).
 - Validity is a DEPTH check, not a parity check: an even quote count can be unclosed (`echo 'a 'b` nests and ends at depth 2), and an odd count always is.
 
 For command substitutions:
 
-- `$(` increments the substitution depth; a `)` with no open quote region in the body closes it (decrements). Explicit delimiters — the neighbor rule is not involved.
-- Backticks follow the quote rule above; positive backtick depth at end of input is an unclosed backtick.
+- `$(` increments the substitution depth. A `)` with no open quote region in the body decrements it. These are explicit delimiters. The neighbor rule is not involved.
+- Backticks follow the quote rule above. A positive backtick depth at end of input is an unclosed backtick.
 - Positive `$(` depth at end of input is an unclosed command substitution.
 
 ### 9.3 Context Rules
@@ -759,11 +759,11 @@ Which characters are ACTIVE (tracked) in which context — matching quoting.md �
 | Inside `` `...` `` body | Literal | Tracked (body state; never gates the body's closing) | Same-type rule (nest/close) | Tracked (opens nested context) |
 | Inside `$(...)` body | Tracked (body state; gates `)`) | Tracked (body state; gates `)`) | Rule (opens nested context) | Tracked (nested) |
 
-Substitution bodies begin a fresh quote context: enclosing depths are saved and restored at the body boundary, body characters are preserved verbatim, and the body is re-parsed recursively at execution (quoting.md §5.3; lexer.md §7.1).
+Substitution bodies begin a fresh quote context. The enclosing depths are saved at the body boundary. They are restored there too. The body's characters stay verbatim. Execution re-parses the body recursively (quoting.md §5.3, lexer.md §7.1).
 
 ### 9.4 AnalyzedToken.Depth Field
 
-`Depth` is defined PRECISELY as: **the maximum nesting level reached within the token, across quote regions and command substitutions** — the high-water mark of the combined total depth (quoting.md §5.4) over the token's span.
+`Depth` is defined PRECISELY as **the maximum nesting level reached within the token, across quote regions and command substitutions**. It is the high-water mark of the combined total depth (quoting.md §5.4) over the token's span.
 
 ```go
 // Maintain a running total nesting level:
@@ -971,9 +971,9 @@ Future enhancements may include:
 
 ## Appendix B: Test Coverage Summary
 
-The implementation includes comprehensive tests covering:
+A conformance suite MUST cover each behavior below.
 
-### Analyzer Tests (`analyzer_test.go`)
+### Analyzer Tests
 - Basic command parsing
 - Token position accuracy
 - All operator types
@@ -995,7 +995,7 @@ The implementation includes comprehensive tests covering:
 - Command after semicolon
 - Lexer/analyzer validity cross-check (§7.1)
 
-### Highlighter Tests (`highlighter_test.go`)
+### Highlighter Tests
 - Basic command highlighting
 - All operator highlighting
 - Redirection highlighting
@@ -1014,7 +1014,7 @@ The implementation includes comprehensive tests covering:
 - Whitespace handling
 - ANSI reset after each token
 
-### Diagnostics Tests (`diagnostics_test.go`)
+### Diagnostics Tests
 - Single error formatting
 - Multiple error formatting
 - Caret alignment

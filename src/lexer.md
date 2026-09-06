@@ -9,18 +9,18 @@ description: Tokenization rules, operator recognition, command-substitution-awar
 
 ## 1. Overview
 
-The lexer (tokenizer) is the first stage of Foundation Shell's input processing pipeline. It transforms raw input strings into a sequence of tokens that preserve semantic information about quoting context. The lexer operates as a single-pass scanner that handles escape sequences, quote state tracking, operator recognition, command-substitution scanning, `#` comments, and whitespace-based token separation — including newlines as command separators.
+The lexer (tokenizer) is the first stage of Foundation Shell's input processing pipeline. It transforms raw input strings into a sequence of tokens that preserve semantic information about quoting context. The lexer operates as a single-pass scanner. It handles escape sequences, quote state tracking, operator recognition, and command-substitution scanning. It also handles `#` comments and whitespace-based token separation, with a newline as a command separator.
 
 ### 1.1 Design Philosophy
 
 Foundation Shell's lexer follows these principles:
 
-1. **Quote Context Preservation**: Tokens retain metadata about whether any part was quoted (`WasQuoted`) and whether any part was single-quoted (`WasSingleQuoted`), enabling downstream components to decide whether to perform expansions.
+1. **Quote Context Preservation**: a token records whether any part was quoted (`WasQuoted`) and whether any part was single-quoted (`WasSingleQuoted`). A downstream component reads those flags to decide which expansions to perform.
 2. **Escape Marker System**: Escaped dollar signs and escaped backticks are marked with a special character (`\x01`) to prevent expansion while preserving the original intent.
 3. **Operator Recognition**: The lexer recognizes operators directly (maximal munch, no whitespace required) and marks the resulting tokens with `IsOperator`. The parser maps marked operator tokens to formal token types and never re-derives operators from token content.
 4. **Command-Substitution Awareness**: The lexer tracks `$(...)` parenthesis depth and backtick state so that an entire substitution — including embedded whitespace and quotes — stays in one token. Substitution bodies are preserved verbatim and re-parsed recursively when the substitution executes.
 5. **Unicode Support**: The lexer operates on runes, supporting full Unicode input.
-6. **One Scanner**: `Scan` is the only tokenizer in the shell. Highlighting and diagnostics do not re-tokenize; they read the same scan (quoting.md §1.3). A rule stated in this file is therefore implemented once.
+6. **One Scanner**: `Scan` is the only tokenizer in the shell. Highlighting and diagnostics do not re-tokenize. They read the same scan (quoting.md §1.3). A rule stated in this file is therefore applied once.
 
 ### 1.2 Processing Pipeline Position
 
@@ -39,8 +39,8 @@ Input String
      |                  (execution view: whitespace and comments dropped,
      |                   newline materialized as ;)
      |
-     +--> [VALIDATE] --> Problem[]  (the structural rules, ONE implementation;
-     |                   the parser renders them as errors, the analyzer as
+     +--> [VALIDATE] --> Problem[]  (the structural rules, stated ONCE.
+     |                   The parser renders them as errors, the analyzer as
      |                   caret diagnostics — diagnostics.md §5.1 and §5.2)
      |
      +--> [ANALYZE] --> AnalyzedToken[] (highlighting.md: classification only)
@@ -100,7 +100,7 @@ Value tokens carry a string value in their `Value` field.
 | `RedirectStdErr` | `2>` | Stderr redirection (overwrite) |
 | `RedirectStdErrAppend` | `2>>` | Stderr redirection (append) |
 
-Operator tokens have an empty `Value` field; their meaning is conveyed by their type.
+An operator token has an empty `Value` field. Its type carries its meaning.
 
 ### 2.3 Word and Token Vocabulary
 
@@ -121,7 +121,7 @@ Whitespace serves as a token separator, NOT a token itself. The lexer consumes w
 
 #### 3.1.1 Whitespace Characters
 
-The lexer uses Go's `unicode.IsSpace()` to identify whitespace, which includes:
+Whitespace is any rune with the Unicode White_Space property. That set includes:
 
 - Space (U+0020)
 - Horizontal tab (U+0009)
@@ -129,7 +129,7 @@ The lexer uses Go's `unicode.IsSpace()` to identify whitespace, which includes:
 - Vertical tab (U+000B)
 - Form feed (U+000C)
 - Carriage return (U+000D)
-- Various Unicode space characters
+- The other Unicode space characters, such as U+00A0 and U+2028
 
 Newline is special: at total depth 0 it not only separates words but also separates COMMANDS (§3.4). Every other whitespace character only separates words.
 
@@ -172,7 +172,7 @@ A word boundary occurs when:
 2. An operator is recognized (§3.3)
 3. End of input is reached
 
-Words are accumulated character-by-character until a boundary is reached. At EVERY word boundary the per-word flags (`WasSingleQuoted`, `WasQuoted`) are reset — whether or not a token was emitted at that boundary. (A run of whitespace produces no token but still resets the flags; this guarantees that `echo '' $HOME` expands `$HOME`.)
+Words are accumulated character-by-character until a boundary is reached. At EVERY word boundary the per-word flags (`WasSingleQuoted`, `WasQuoted`) are reset — whether or not a token was emitted at that boundary. (A run of whitespace produces no token, and it still resets the flags. That is what guarantees that `echo '' $HOME` expands `$HOME`.)
 
 ### 3.3 Operator Recognition
 
@@ -201,14 +201,14 @@ echo 2 >out.log     -> [echo, 2, >, out.log]     (whitespace separates the 2)
 
 #### 3.3.2 Single `&` Is Not an Operator
 
-Foundation Shell has no background jobs. A lone `&` is a literal word character; only the two-character `&&` is an operator:
+Foundation Shell has no background jobs. A lone `&` is a literal word character. Only the two-character `&&` is an operator:
 
 ```
 echo a&b     -> [echo, a&b]          (one word)
 echo a&&b    -> [echo, a, &&, b]
 ```
 
-This is a LEXING rule, not a licence to run `cmd &`. A `&` written as a word of its own is rejected by the parser (parser.md §Background Execution Is Guarded). The lexer still hands it back as a word — the guard belongs to the parser, which is the layer that can see the word stands alone.
+This is a LEXING rule, not a licence to run `cmd &`. A `&` written as a word of its own is rejected by the parser (parser.md §Background Execution Is Guarded). The lexer still hands it back as a word. The guard belongs to the parser, which is the layer that can see the word stands alone.
 
 #### 3.3.3 Examples
 
@@ -239,7 +239,7 @@ An unquoted, unescaped newline at total depth 0 (outside every quote region and 
 
 1. The current word (if any) is flushed as a token, exactly as for other whitespace
 2. A pending-separator flag is set. A run of newlines — with or without other whitespace and comments (§8) between them — sets it once
-3. When the NEXT token is about to be emitted, the pending separator first materializes as a semicolon operator token (`{Content: ";", IsOperator: true}`) — UNLESS no token has been emitted yet, or the most recently emitted token is a chain operator (`|`, `&&`, `||`, `;`)
+3. The pending separator materializes as a semicolon operator token (`{Content: ";", IsOperator: true}`) just before the NEXT token is emitted. Two conditions suppress it. No token has been emitted yet, or the token emitted most recently is a chain operator (`|`, `&&`, `||`, `;`)
 
 The suppression cases make the newline a forgiving separator:
 
@@ -248,9 +248,9 @@ The suppression cases make the newline a forgiving separator:
 - A trailing newline produces nothing (no token follows it)
 - After a chain operator, a newline is a CONTINUATION: `cmd1 &&<newline>cmd2` behaves exactly like `cmd1 && cmd2`, and `cmd1 ;<newline>cmd2` does not produce consecutive operators
 
-After a REDIRECTION operator the separator is NOT suppressed: `cmd ><newline>file` lexes as `cmd`, `>`, `;`, `file`, and the parser reports `missing redirection target: > followed by operator ;` — a redirection cannot be continued across an unescaped newline (as in POSIX shells).
+After a REDIRECTION operator the separator is NOT suppressed. So `cmd ><newline>file` lexes as `cmd`, `>`, `;`, `file`. The parser then reports `missing redirection target: > followed by operator ;`. A redirection cannot continue across an unescaped newline, exactly as in POSIX shells.
 
-Newlines inside quote regions or substitution bodies are content, preserved in the token (§3.1.2). The escape sequence `\<newline>` is NOT line continuation (§13); per the escape table it produces a literal newline character inside the word.
+Newlines inside quote regions or substitution bodies are content, preserved in the token (§3.1.2). The escape sequence `\<newline>` is NOT line continuation (§13). The escape table gives it a literal newline character inside the word.
 
 #### 3.4.1 Examples
 
@@ -358,7 +358,7 @@ Tokens: [{Content: "echo"},
 
 ### 4.3 Backticks (`` `...` ``)
 
-Backticks delimit command substitution. The lexer tracks backtick depth (§7) with the open/nest/close quote rule (quoting.md §5.2): an unescaped backtick outside single quotes opens a substitution at depth 0; inside one, it nests (whitespace-delimited) or closes. Between the outermost pair, the body — including whitespace, quote characters, and nested backticks — is preserved verbatim in the token.
+Backticks delimit command substitution. The lexer tracks backtick depth (§7) with the open/nest/close quote rule (quoting.md §5.2). An unescaped backtick outside single quotes opens a substitution at depth 0. Inside an open one it nests, by the whitespace conditions, or it closes. The body between the outermost pair stays verbatim in the token. That includes its whitespace, its quote characters, and its nested backticks.
 
 #### 4.3.1 Backtick Behavior in Lexer
 
@@ -368,7 +368,7 @@ Tokens: [{Content: "echo"},
          {Content: "`date +%Y %m`"}]
 ```
 
-The backtick-delimited content remains in the token; the expander executes it later (see §7 and expansion.md).
+The backtick-delimited content remains in the token. The expander executes it later (see §7 and expansion.md).
 
 ### 4.4 Quote Concatenation
 
@@ -410,7 +410,7 @@ Input: ''
 Tokens: [{Content: "", WasSingleQuoted: true, WasQuoted: true}]
 ```
 
-A quoted-empty word is still a word: seeing a quote pair makes the current word exist, so a token is emitted at the next boundary even though it has no content. Whitespace runs alone still produce no token.
+A quoted-empty word is still a word. A quote pair makes the current word exist. A token is therefore emitted at the next boundary, even with no content in it. A run of whitespace alone still produces no token.
 
 ---
 
@@ -422,7 +422,7 @@ Escape processing occurs outside single quotes. The backslash character (`\`) in
 
 ### 5.1 The Escape Marker System
 
-When `\$` or `` \` `` is encountered (outside single quotes and outside substitution bodies), the lexer produces the two-character sequence `\x01$` (or `` \x01` ``) rather than just the bare character. This "escape marker" (`\x01`, ASCII SOH) serves as a flag to the expander that this dollar sign or backtick should NOT trigger expansion or command substitution.
+When `\$` or `` \` `` is encountered (outside single quotes and outside substitution bodies), the lexer produces the two-character sequence `\x01$` (or `` \x01` ``) rather than just the bare character. This "escape marker" (`\x01`, ASCII SOH) tells the expander that the dollar sign or backtick after it must NOT trigger expansion or command substitution.
 
 #### 5.1.1 Escape Marker Constant
 
@@ -432,8 +432,8 @@ const EscapeMarker = '\x01'  // ASCII Start of Heading
 
 #### 5.1.2 Escape Marker Lifecycle
 
-1. **Lexer**: `\$VAR` becomes `\x01$VAR`; `` \`date\` `` becomes `` \x01`date\x01` ``
-2. **Expander**: Sees `\x01$` / `` \x01` ``, skips expansion, keeps the character literal
+1. **Lexer**: `\$VAR` becomes `\x01$VAR`. Likewise `` \`date\` `` becomes `` \x01`date\x01` ``
+2. **Expander**: it sees `\x01$` or `` \x01` ``, skips expansion, and keeps the character literal
 3. **Post-expansion**: `StripEscapeMarkers()` removes any remaining `\x01` characters
 
 #### 5.1.3 StripEscapeMarkers Function
@@ -515,18 +515,18 @@ The lexer recognizes command-substitution **delimiters** so that an entire subst
 ### 7.1 Substitution Scanning Rules
 
 1. An unescaped `$(` outside single quotes opens a command substitution and increments the parenthesis depth. `$(...)` may nest: each `$(` inside an open substitution increments the depth again.
-2. An unescaped backtick outside single quotes follows the open/nest/close quote rule (quoting.md §5.2): at backtick depth 0 it opens a substitution; inside one it NESTS one level (whitespace before; non-whitespace, non-quote rune after) or CLOSES one level. Nested backticks are preserved in the body and execute recursively when the body is re-parsed (quoting.md §6.3). Escaped backticks — `` \` `` — never reach the rule; they are literal at this level and yield a literal backtick character when the body is re-parsed.
+2. An unescaped backtick outside single quotes follows the open/nest/close quote rule (quoting.md §5.2). At backtick depth 0 it opens a substitution. Inside an open one it NESTS one level, with whitespace before it and a non-whitespace, non-quote rune after it. Otherwise it CLOSES one level. A nested backtick stays in the body. It executes recursively when the body is re-parsed (quoting.md §6.3). An escaped backtick (`` \` ``) never reaches the rule. It is literal at this level, and it yields a literal backtick character when the body is re-parsed.
 3. While inside an open substitution (parenthesis depth > 0, or backtick open), the body is preserved **verbatim**:
-   - Whitespace does NOT split tokens; it is copied into the token.
+   - Whitespace does NOT split tokens. It is copied into the token.
    - Quote characters (`'`, `"`) are copied verbatim — they are not removed and they do NOT set the token's `WasQuoted`/`WasSingleQuoted` flags. They do update the body's own quote state (rule 4).
    - Backslash escape sequences are copied verbatim (backslash retained). The escaped character is skipped for state purposes: it cannot close the substitution, affect body quote state, or start a nested substitution.
-   - Operator characters are NOT recognized; they are body content.
+   - Operator characters are NOT recognized. They are body content.
 
    The body takes effect when the substitution executes: the expander re-parses the body recursively with the full lexer (quotes, escapes, operators and all). This is why the body must be preserved exactly as written.
 4. Finding the closing delimiter — body quote state (tracked with the same quoting.md §5.2 rule):
    - Each `$(` — and each outermost backtick — begins a fresh quote context. The enclosing context (for example an open double quote around the whole substitution) is saved and restored when the substitution closes. `echo "$(date)"` is therefore valid: the `)` closes the substitution even though the outer double quote is still open.
-   - A `)` closes the innermost open `$(` only when the body context has no open single-quote region, no open double-quote region, and no open backtick (all three body depths are 0). Otherwise the `)` is body content. Both `echo $(echo ")")` and `echo $(echo ')')` are valid.
-   - Inside an open backtick body, single quotes are literal (they do not open a quote context — see quoting.md §5.3); double quotes update the body's own quote state but never prevent the body from closing; an unescaped backtick nests or closes the body per rule 2. Use `` \` `` for a literal backtick character inside a backtick body.
+   - A `)` closes the innermost open `$(` only when the body context has no open quote region and no open backtick. Every body depth must be 0. Otherwise the `)` is body content. Both `echo $(echo ")")` and `echo $(echo ')')` are valid.
+   - Inside an open backtick body, single quotes are literal. They do not open a quote context (quoting.md §5.3). Double quotes update the body's own quote state, but they never prevent the body from closing. An unescaped backtick nests or closes the body under rule 2. Use `` \` `` for a literal backtick character inside a backtick body.
 5. Substitutions still open at end of input are lexer errors, using the same canonical strings as the analyzer (§9): `unclosed command substitution $(...)` and `unclosed backtick`.
 
 ### 7.2 Examples
@@ -561,9 +561,9 @@ $(echo $(date))
 
 Processing order:
 1. The expander finds the outer `$(...)` and hands its body `echo $(date)` to the executor
-2. The executor re-parses the body with the same parser; expanding the body's tokens finds the inner `$(date)`
-3. `date` executes; its output replaces the inner substitution
-4. `echo <output>` executes; its output replaces the outer substitution
+2. The executor re-parses the body with the same parser. Expanding the body's tokens finds the inner `$(date)`
+3. `date` executes. Its output replaces the inner substitution
+4. `echo <output>` executes. Its output replaces the outer substitution
 
 Syntactically inner substitutions therefore complete first — but substitution OUTPUT is never re-scanned for further substitutions (expansion.md §Single-Pass Expansion).
 
@@ -579,7 +579,7 @@ Command substitutions are NOT expanded when:
 
 ## 8. Comment Handling
 
-The `#` character begins a comment when it appears at the START of a word: unquoted, unescaped, outside every quote region and substitution body, with no pending word content (§10.1: `sawWord` is false). The comment extends to — and not including — the next newline, or to end of input. Comment text is discarded; it produces no tokens.
+The `#` character begins a comment when it appears at the START of a word. It must be unquoted and unescaped, outside every quote region and substitution body, with no pending word content (§10.1, where `sawWord` is false). The comment extends to the next newline, and does not include it. A comment with no following newline extends to end of input. Comment text is discarded, and it produces no tokens.
 
 A `#` anywhere else is a literal character:
 
@@ -611,7 +611,7 @@ Tokens: [echo, hello]
 
 ## 9. Error Conditions
 
-The lexer reports scanning errors using the SAME canonical strings as the syntax analyzer for the same conditions. The canonical error-string table lives in diagnostics.md §5; the lexer can produce these four:
+The lexer reports scanning errors using the SAME canonical strings as the syntax analyzer for the same conditions. The canonical error-string table lives in diagnostics.md §5. The lexer can produce the strings below:
 
 | Condition | Error string |
 |-----------|--------------|
@@ -663,23 +663,23 @@ The lexer maintains these state variables:
 
 | Variable | Type | Purpose |
 |----------|------|---------|
-| `tokens` | `[]TokenContext` | Accumulated tokens |
-| `current` | `strings.Builder` | Current word being built |
-| `sawWord` | `bool` | A word exists since the last boundary (content appended OR a quote pair seen) |
-| `pendingNewline` | `bool` | A depth-0 newline was seen; a `;` operator token materializes before the next emitted token (§3.4) |
-| `wasSingleQuoted` | `bool` | Current word contains single-quoted content |
-| `wasQuoted` | `bool` | Current word contains quoted content (any quote type) |
-| `singleQuoteDepth` | `int` | Open single-quote regions in the CURRENT context (quoting.md §5.1) |
-| `doubleQuoteDepth` | `int` | Open double-quote regions in the CURRENT context |
-| `backtickDepth` | `int` | Open backtick substitutions in the CURRENT context |
-| `dollarParenDepth` | `int` | Open `$(` count |
+| `tokens` | token list | Accumulated tokens |
+| `current` | text buffer | Current word being built |
+| `sawWord` | flag | A word exists since the last boundary. Either content was appended, or a quote pair was seen |
+| `pendingNewline` | flag | A depth-0 newline was seen. A `;` operator token materializes before the next emitted token (§3.4) |
+| `wasSingleQuoted` | flag | Current word contains single-quoted content |
+| `wasQuoted` | flag | Current word contains quoted content of any type |
+| `singleQuoteDepth` | counter | Open single-quote regions in the CURRENT context (quoting.md §5.1) |
+| `doubleQuoteDepth` | counter | Open double-quote regions in the CURRENT context |
+| `backtickDepth` | counter | Open backtick substitutions in the CURRENT context |
+| `dollarParenDepth` | counter | Open `$(` count |
 | `contextStack` | stack | Saved `{singleQuoteDepth, doubleQuoteDepth, backtickDepth}` per substitution level (§7.1 rule 4) |
 
-The three quote depths follow the open/nest/close rule (quoting.md §5.2, exposed below as `quoteAction`). Depth 0 means "no region of that type open in this context"; a toggle model's booleans correspond to depth 0 vs. depth ≥ 1.
+The quote depths follow the open/nest/close rule (quoting.md §5.2, exposed below as `quoteAction`). Depth 0 means no region of that type is open in this context. A toggle model's flags correspond to depth 0 against depth 1 or more.
 
 ### 10.2 Processing Loop
 
-The quote branches call `quoteAction(input, i, depth)` — the shared open/nest/close decision of quoting.md §5.2.2.
+The quote branches call `quoteAction(input, i, depth)`, which is the shared open/nest/close decision of quoting.md §5.2.2.
 
 Every token emission — in the loop and in the post-loop flush — goes through one helper that first materializes a pending newline separator (§3.4):
 
@@ -790,14 +790,14 @@ for each rune c at index i in input:
 
 Notes:
 
-- The `'` and `"` branches strip only the OUTERMOST delimiters (Open from depth 0, Close to depth 0) outside substitution bodies; nested quote characters stay in the token (quoting.md §5.2 rule 3, §8.2).
-- A backtick's Open/Close (0↔1) transitions push/pop the context stack; Nest and nested Close do not — nested backticks are body content, re-parsed recursively at execution (§7.1, quoting.md §6.3).
+- The `'` and `"` branches strip only the OUTERMOST delimiters outside a substitution body. Those are an Open from depth 0 and a Close to depth 0. A nested quote character stays in the token (quoting.md §5.2 rule 3, §8.2).
+- A backtick's Open and Close transitions (0↔1) push and pop the context stack. A Nest and a nested Close do not. A nested backtick is body content, re-parsed recursively at execution (§7.1, quoting.md §6.3).
 - In the whitespace, newline, comment, and operator guards, "all quote depths 0 AND NOT inBody" is exactly the total-depth-0 condition of quoting.md §5.4.
 - The newline branch must precede the generic whitespace branch (a newline satisfies `isSpace`).
 
 ### 10.3 Post-Loop Processing
 
-After the loop (checks run in this order; the first match is the single error returned — §9.2):
+After the loop the checks run in this order. The first match is the single error returned (§9.2):
 
 1. `singleQuoteDepth > 0` -> error `unclosed single quote`
 2. `doubleQuoteDepth > 0` -> error `unclosed double quote`
@@ -806,7 +806,7 @@ After the loop (checks run in this order; the first match is the single error re
 5. If `sawWord`, emit the final token (through `emit`, so a pending separator still materializes before it)
 6. Return token slice
 
-(The depths inspected are the current — innermost — context's; input that ends inside a substitution body reports the body's open quote region first, then the enclosing substitution. A `pendingNewline` still set after step 5 is simply discarded — a trailing newline produces no token.)
+(The depths inspected belong to the current context, which is the innermost one. Input that ends inside a substitution body reports the body's open quote region first, then the enclosing substitution. A `pendingNewline` still set after step 5 is discarded. A trailing newline produces no token.)
 
 ### 10.4 Complexity
 
@@ -822,7 +822,7 @@ After the loop (checks run in this order; the first match is the single error re
 The parser calls `lexer.Tokenize(input)` and receives `[]TokenContext`. It then:
 
 1. Maps tokens marked `IsOperator: true` to formal operator types by content. The parser NEVER re-derives operators from content: a token whose `Content` is `|` but whose `IsOperator` is `false` (because it was quoted or escaped) is an ordinary value token.
-2. For value tokens, applies expansions (tilde, environment, command substitution) unless `WasSingleQuoted`; tilde expansion is additionally suppressed by `WasQuoted`
+2. For a value token, applies the expansions (tilde, environment, command substitution) unless `WasSingleQuoted` is set. A set `WasQuoted` additionally suppresses tilde expansion
 3. Strips escape markers — unconditionally, for every value token
 4. Classifies as `Command` or `CommandArgument` based on position
 
@@ -849,7 +849,7 @@ After all expansions, escape markers are removed. Stripping is UNCONDITIONAL —
 expandedValue = lexer.StripEscapeMarkers(expandedValue)
 ```
 
-This converts `\x01$VAR` to `$VAR` (literal dollar sign, not expanded).
+This converts `\x01$VAR` to `$VAR`. The dollar sign is literal, and nothing expands it.
 
 ---
 
@@ -1011,4 +1011,4 @@ func StripEscapeMarkers(s string) string
 const EscapeMarker = '\x01'  // ASCII SOH (Start of Heading)
 ```
 
-Used to mark escaped dollar signs and escaped backticks that should not be expanded.
+It marks an escaped dollar sign or an escaped backtick, which nothing expands.

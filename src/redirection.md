@@ -8,8 +8,6 @@ recommend_after: operators.md
 
 > **Canonical for:** I/O redirection — operators, targets and their expansion, file semantics, redirection error handling and messages. Redirection *tokenization* is specified in lexer.md §3.3; the expansion pipeline in expansion.md. The authority map lives in the README.
 
-Implementation: the foundation-shell repository; this specification is authoritative.
-
 ## 1. Overview
 
 I/O redirection allows commands to read input from files instead of stdin and write output to files instead of stdout or stderr. Foundation Shell supports standard UNIX-style redirection operators for input, output, and error streams.
@@ -32,8 +30,8 @@ This specification covers:
 - Error handling
 
 This specification does NOT cover (unsupported features):
-- Here-documents (`<<`) and here-strings (`<<<`) — attempts are rejected with a dedicated parse error (§9.6); a FUTURE feature (§15)
-- File descriptor duplication (`2>&1`, `>&2`) — attempts are rejected with a dedicated parse error (§9.5); a FUTURE feature (§15)
+- Here-documents (`<<`) and here-strings (`<<<`). An attempt is rejected with a dedicated parse error (§9.6). Both are a FUTURE feature (§15)
+- File descriptor duplication (`2>&1`, `>&2`). An attempt is rejected with a dedicated parse error (§9.5). It is a FUTURE feature (§15)
 - Process substitution (`<(...)`, `>(...)`)
 - `/dev/null` or other special files (handled by the OS, not the shell)
 
@@ -168,7 +166,7 @@ make 2> build_errors.log
 **Implementation Details:**
 - Uses `os.OpenFile()` with flags: `O_WRONLY | O_CREATE | O_TRUNC`
 - Creates file with permissions `0644` if it does not exist
-- The `2` and `>` MUST NOT be separated by whitespace (parsed as single token `2>`)
+- Whitespace MUST NOT separate the `2` from the `>`. The lexer reads `2>` as one token
 
 ### 3.5 Error Redirection (Append): `2>> file`
 
@@ -193,7 +191,7 @@ command2 2>> errors.log
 **Implementation Details:**
 - Uses `os.OpenFile()` with flags: `O_WRONLY | O_CREATE | O_APPEND`
 - Creates file with permissions `0644` if it does not exist
-- The `2` and `>>` MUST NOT be separated by whitespace (parsed as single token `2>>`)
+- Whitespace MUST NOT separate the `2` from the `>>`. The lexer reads `2>>` as one token
 
 ---
 
@@ -241,14 +239,14 @@ This order ensures that:
 
 ### 5.3 Last-Wins Semantics (Parse-Time)
 
-If the same file descriptor is redirected multiple times, the **last** redirection wins — at PARSE time. Earlier targets are discarded before execution begins, so they are never opened:
+If the same file descriptor is redirected multiple times, the **last** redirection wins — at PARSE time. Earlier targets are discarded before execution begins. Nothing ever opens them:
 
 ```bash
 echo test > file1.txt > file2.txt
 # Only file2.txt receives output; file1.txt is NEVER created
 ```
 
-The parser stores a single target per redirection type (`InputFile`, `OutputFile`, `ErrorFile`); a later redirection to the same descriptor overwrites the previous value. This is a documented deviation from POSIX shells, which open every redirection in order (bash creates — and truncates — `file1.txt`).
+The parser stores one target per redirection type, in `InputFile`, `OutputFile`, and `ErrorFile`. A later redirection to the same descriptor overwrites the previous value. This is a documented deviation from POSIX shells, which open every redirection in order (bash creates — and truncates — `file1.txt`).
 
 ---
 
@@ -347,7 +345,7 @@ Middle or end commands in a pipeline that use input redirection have their stdin
 cmd1 | grep < search_terms.txt pattern
 ```
 
-The disconnected pipe's read end is closed immediately at wiring time, so the upstream producer terminates instead of blocking forever on a pipe nobody reads (execution.md §Early Exit Terminates Producers). The pipeline always completes.
+The disconnected pipe's read end is closed at wiring time. The upstream producer therefore terminates. It never blocks forever on a pipe nobody reads (execution.md §Early Exit Terminates Producers). The pipeline always completes.
 
 ---
 
@@ -395,7 +393,7 @@ echo "test" > /path/to/newdir/file.txt
 
 ## 9. Error Handling
 
-Redirection produces two classes of errors: PARSE-time errors (§9.3–§9.5), which reject the whole input before anything runs, and RUNTIME open failures (§9.1–§9.2), which fail only the affected command — the rest of the chain continues per operator logic (execution.md §Runtime Failures Never Abort the Chain).
+Redirection produces two classes of errors. A PARSE-time error (§9.3–§9.5) rejects the whole input before anything runs. A RUNTIME open failure (§9.1–§9.2) fails only the affected command. The rest of the chain continues under the usual operator logic (execution.md §Runtime Failures Never Abort the Chain).
 
 ### 9.1 Runtime Open Failures
 
@@ -403,15 +401,15 @@ Redirection produces two classes of errors: PARSE-time errors (§9.3–§9.5), w
 
 **Behavior:**
 - The affected command does NOT execute
-- The command's exit status is 1, which feeds operator evaluation; the chain CONTINUES (`cat < /missing || echo recovered` prints `recovered`)
-- The message is printed to stderr in EXACTLY this format — no wrapper prefix (no `execution error:`), and the filename appears exactly once (the OS reason is unwrapped; no doubled `open <file>:` prefix):
+- The command's exit status is 1, which feeds operator evaluation. The chain CONTINUES, so `cat < /missing || echo recovered` prints `recovered`
+- The message is printed to stderr in EXACTLY this format. It carries no wrapper prefix, such as `execution error:`. The filename appears one time only. The OS reason is unwrapped, with no doubled `open <file>:` prefix:
 
 ```
 cannot open input file <filename>: <os reason>
 cannot open output file <filename>: <os reason>
 ```
 
-`input` is used for `<`; `output` for `>`, `>>`, `2>`, and `2>>`.
+The word `input` is used for `<`. The word `output` is used for `>`, `>>`, `2>`, and `2>>`.
 
 **Example transcript:**
 ```bash
@@ -454,7 +452,7 @@ command > &&        # Operator instead of filename
 
 **Behavior:**
 - Parse error: `empty redirection target`
-- Nothing on the line executes; the shell records status 1 (as for any parse error)
+- Nothing on the line executes. The shell records status 1, as it does for any parse error
 - The redirection is NOT silently dropped — a redirection that was written must never vanish
 
 ```bash
@@ -468,7 +466,7 @@ empty redirection target
 
 **Condition:** An UNQUOTED target word begins with `&`.
 
-File descriptor duplication (`2>&1`, `>&2`) is a documented FUTURE feature (§15). Today `2>&1` lexes as the operator `2>` followed by the word `&1` (lexer.md §3.3), which would silently create a file named `&1`. To prevent that trap, the parser rejects it:
+File descriptor duplication (`2>&1`, `>&2`) is a documented FUTURE feature (§15). Today `2>&1` lexes as the operator `2>` followed by the word `&1` (lexer.md §3.3). Left alone, that silently creates a file named `&1`. The parser rejects it, to prevent the trap:
 
 **Behavior:**
 - Parse error: `file descriptor duplication is not supported: <word>`
@@ -485,7 +483,7 @@ $ echo hi > '&1'      # OK: quoted - writes a file literally named &1
 
 **Condition:** A `<` operator is immediately followed by another `<` operator.
 
-Here-documents (`<<`) and here-strings (`<<<`) are documented FUTURE features (§15). The lexer has no `<<` operator, so `cat <<EOF` lexes as `<`, `<`, `EOF` (lexer.md §3.3). Reported by §9.3's rule that would be `missing redirection target: < followed by operator <`, which describes the token stream accurately and the reader's actual mistake not at all: it sends them looking for a filename, when the real answer is that the construct does not exist here. The parser names it instead:
+Here-documents (`<<`) and here-strings (`<<<`) are documented FUTURE features (§15). The lexer has no `<<` operator, so `cat <<EOF` lexes as `<`, `<`, `EOF` (lexer.md §3.3). Under §9.3's rule that reports `missing redirection target: < followed by operator <`. That message describes the token stream accurately. It describes the reader's actual mistake not at all. It sends the reader looking for a filename. The real answer is that the construct does not exist here. The parser names it instead:
 
 **Behavior:**
 - Parse error: `here-documents are not supported`
@@ -501,7 +499,7 @@ here-documents are not supported
 
 ### 9.7 Error Message Output
 
-Runtime redirection errors are written to stderr — the ORIGINAL stderr if the failing redirection is `2>`/`2>>` itself (the error is reported before the redirection would have been applied).
+Runtime redirection errors are written to stderr. When the failing redirection is `2>` or `2>>` itself, they go to the ORIGINAL stderr. The report happens before that redirection is applied.
 
 ### 9.8 Error Summary
 
@@ -519,7 +517,7 @@ Runtime redirection errors are written to stderr — the ORIGINAL stderr if the 
 
 ## 10. Expansion in Redirection Targets
 
-Redirection target filenames undergo the SAME expansion pipeline as command arguments — including command substitution (expansion.md is canonical for the pipeline; this section shows its application to targets).
+Redirection target filenames undergo the SAME expansion pipeline as command arguments, command substitution included. The pipeline is canonical in expansion.md. This section shows how it applies to targets.
 
 ### 10.1 Variable Expansion
 
@@ -602,7 +600,7 @@ echo "log" > $(date +%F).log     # writes to e.g. 2026-07-15.log
 
 The full pipeline of expansion.md §Expansion Order, applied to the target token:
 
-1. Tilde expansion (token starts with unquoted `~`; skipped when `WasQuoted`)
+1. Tilde expansion, when the token starts with an unquoted `~`. It is skipped when `WasQuoted` is true
 2. Environment variable expansion (`$VAR`, `${VAR}`, `$?`)
 3. Command substitution (`$(...)`, `` `...` ``)
 4. Escape marker stripping (unconditional)
@@ -753,7 +751,7 @@ echo "user data" > ~/$USER/data.txt
 
 ## 14. Differences from POSIX Shell
 
-Foundation Shell implements a subset of POSIX shell redirection. Notable omissions:
+Foundation Shell defines a subset of POSIX shell redirection. Notable omissions:
 
 | Feature | POSIX | Foundation Shell |
 |---------|-------|------------------|

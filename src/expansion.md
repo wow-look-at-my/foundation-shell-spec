@@ -8,8 +8,6 @@ recommend_after: quoting.md
 
 > **Canonical for:** the expansion pipeline — tilde expansion, variable expansion (including the special parameter `$?`), command substitution semantics, and expansion suppression. Quote *semantics* live in quoting.md; tokenization lives in lexer.md. The authority map lives in the README.
 
-Implementation: the foundation-shell repository; this specification is authoritative.
-
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -32,7 +30,7 @@ Foundation Shell's expansion system transforms tokens through a series of ordere
 ### Key Principles
 
 1. **Single-quoted tokens are never expanded** — a token with `WasSingleQuoted: true` skips tilde, variable, and command substitution expansion entirely
-2. **Quoted tokens never tilde-expand** — a token with `WasQuoted: true` (any quote type, any part of the token) skips tilde expansion; variable expansion and command substitution still apply unless the token was single-quoted
+2. **Quoted tokens never tilde-expand**. A token with `WasQuoted: true` skips tilde expansion. This holds for any quote type, in any part of the token. Variable expansion and command substitution still apply, unless the token was single-quoted
 3. **Expansion order is deterministic** — tilde, then variables, then command substitution, then escape-marker stripping
 4. **Escape-marker stripping is unconditional** — it runs for EVERY value token, including single-quoted ones
 5. **Expansion results are data, never code** — text produced by an expansion (a variable's value, a substitution's output) is never re-scanned for further expansions
@@ -86,7 +84,7 @@ Expanded Token
 
 ### Reference Code
 
-The parser applies the pipeline per token. `lastStatus` is the shell's last recorded command-line status (see [Special Parameters](#special-parameters) and execution.md §Last Exit Code), supplied by the shell for each parse:
+The parser applies the pipeline per token. `lastStatus` is the shell's last recorded command-line status (see [Special Parameters](#special-parameters) and execution.md §Last Exit Code). The shell supplies it for each parse:
 
 ```go
 // For each value token tc (lexer.TokenContext):
@@ -174,7 +172,7 @@ echo ~/"docs"     # Outputs: ~/docs     (whole-token granularity, see above)
 
 ### Reference Code
 
-The `WasQuoted` check happens in the caller (see [Expansion Order](#expansion-order)); `ExpandTilde` itself only inspects the content:
+The caller performs the `WasQuoted` check (see [Expansion Order](#expansion-order)). `ExpandTilde` itself only inspects the content:
 
 ```go
 func ExpandTilde(token string) string {
@@ -212,14 +210,14 @@ Variable expansion replaces references to environment variables with their value
 
 ### Expansion Rules
 
-1. **ASCII names**: Variable names match `[A-Za-z_][A-Za-z0-9_]*`. Name scanning is byte-wise ASCII; non-ASCII characters never extend a name
+1. **ASCII names**: Variable names match `[A-Za-z_][A-Za-z0-9_]*`. Name scanning is byte-wise ASCII. A non-ASCII character never extends a name
 2. **Greedy matching**: For `$VAR` syntax, the longest valid variable name is matched
 3. **Non-existent variables**: Expand to empty string (no error). The empty result remains an empty argument (see [Word Splitting](#word-splitting))
-4. **Braced form**: `${NAME}` limits the name explicitly. The braced body is looked up in the environment verbatim and is not validated as a name; a body that is not a settable name (e.g. `${?}`, `${VAR:-default}`) normally resolves to empty
+4. **Braced form**: `${NAME}` limits the name explicitly. The braced body is looked up in the environment verbatim. Nothing validates it as a name. A body that is not a settable name, such as `${?}` or `${VAR:-default}`, normally resolves to empty
 5. **Empty braces**: `${}` is left as literal `${}`
 6. **Unclosed brace**: `${VAR` with no closing `}` is treated as literal text
 7. **Dollar at end**: A lone `$` at end of the token is kept literal
-8. **Dollar followed by a non-starter**: Kept as literal `$` (see the recognition rule above; `?` is the one special-parameter exception)
+8. **Dollar followed by a non-starter**: kept as a literal `$`. See the recognition rule above. The `?` is the one special-parameter exception
 9. **Values are data**: The spliced value is never re-scanned — not by variable expansion (a value containing `$Y` stays literal) and not by the later command substitution step (a value containing `$(...)` or backticks stays literal). See [Spliced Values Are Protected](#spliced-values-are-protected)
 
 ### Examples
@@ -261,7 +259,7 @@ and last command-line status `0`:
 
 ### Spliced Values Are Protected
 
-Variable values are spliced in as **data**. To guarantee that the later command substitution step cannot execute text that came from a variable's value, variable expansion escape-marks every `$` and every backtick inside the spliced value (`$` becomes `\x01$`, `` ` `` becomes `` \x01` `` — the same marker the lexer uses, lexer.md §5.1). The markers are removed by the final, unconditional stripping step.
+Variable values are spliced in as **data**. Variable expansion therefore escape-marks every `$` and every backtick inside the spliced value. A `$` becomes `\x01$`, and a backtick becomes `` \x01` ``. This is the same marker the lexer uses (lexer.md §5.1). The later command substitution step can then never execute text that came from a variable's value. The final, unconditional stripping step removes the markers.
 
 ```bash
 # Environment: X='$(echo pwned)'  Y='`date`'  Z='$HOME'
@@ -370,7 +368,7 @@ func isVarChar(c byte) bool {
 }
 ```
 
-Note that `isVarChar` is byte-wise ASCII by design: applying Unicode classification to single bytes would half-consume multi-byte UTF-8 sequences. A reference such as `$Aé` scans the name `A` and leaves `é` as literal text.
+The name scan is byte-wise ASCII by design. Unicode classification applied to single bytes half-consumes a multi-byte UTF-8 sequence. A reference such as `$Aé` therefore scans the name `A` and leaves `é` as literal text.
 
 ---
 
@@ -382,7 +380,7 @@ Command substitution executes a command and replaces the substitution with the c
 
 ### Single-Pass Expansion (No Re-Scan)
 
-Command substitution is **single-pass over the original token**: the scanner walks the token left to right, splices each substitution's output into a result buffer, and NEVER re-scans that buffer. Substitution output containing `$(...)`, backticks, or `$VAR` is literal text.
+Command substitution is **single-pass over the original token**. The scanner walks the token left to right. It splices each substitution's output into a result buffer, and it NEVER re-scans that buffer. Substitution output that contains `$(...)`, backticks, or `$VAR` is literal text.
 
 This is a security property, not an optimization:
 
@@ -396,12 +394,12 @@ A shell that re-scans substitution output executes data as code. Foundation Shel
 
 ### Recursive Execution
 
-The lexer preserves substitution bodies verbatim — embedded whitespace, quotes, escapes, operators, and nested substitutions all stay in the token (lexer.md §7.1). When a substitution is expanded, its body is handed to the executor, which re-parses it **recursively with the same parser and the same executor** (`ParseWithExecutor(body, executor)` — see execution.md §Command Substitution Executor).
+The lexer preserves substitution bodies verbatim — embedded whitespace, quotes, escapes, operators, and nested substitutions all stay in the token (lexer.md §7.1). When a substitution is expanded, its body is handed to the executor, which re-parses it **recursively with the same parser and the same executor** (execution.md §Command Substitution Executor).
 
 Consequences:
 
 1. **Nesting works by recursion**: in `echo $(echo $(pwd))`, expanding the outer body `echo $(pwd)` triggers the inner substitution through the same pipeline. Syntactically inner substitutions therefore complete first. Backtick nesting follows the quote rule (quoting.md §6.3)
-2. **Quoting inside the body is honored**: the recursive parse applies the full quoting rules to the body, so single quotes inside a body suppress expansion within it:
+2. **Quoting inside the body is honored**: the recursive parse applies the full quoting rules to the body. Single quotes inside a body therefore suppress expansion within it:
 
    ```bash
    echo $(echo '$(pwd)')     # Outputs: $(pwd)     - inner text is single-quoted
@@ -434,7 +432,7 @@ echo before $(nosuchcmd) after
 # Line status: 0 (from echo)
 ```
 
-`exit` inside a substitution stops only the substitution's own command sequence; the shell survives (execution.md §exit).
+An `exit` inside a substitution stops only the substitution's own command sequence. The shell survives (execution.md §exit).
 
 ### Output Handling
 
@@ -446,8 +444,8 @@ echo before $(nosuchcmd) after
 
 ```go
 // SubstitutionExecutor executes a command substitution body.
-// (Renamed from SubshellExecutor; "subshell" is reserved for future
-// `()` grouping.)
+// The name is deliberate: "subshell" is reserved for the future
+// `()` grouping construct.
 type SubstitutionExecutor interface {
     Execute(command string) (output string, exitCode int, err error)
 }
@@ -509,7 +507,7 @@ func ExpandCommandSubstitution(token string, executor SubstitutionExecutor) (str
 }
 ```
 
-`findMatchingParen` and `findClosingBacktick` implement [Locating the Delimiters](#locating-the-delimiters): they track the body's own quote state (quoting.md §5.2) and skip backslash- and marker-escaped characters, exactly as the lexer's scan did (lexer.md §10.2).
+`findMatchingParen` and `findClosingBacktick` are [Locating the Delimiters](#locating-the-delimiters). Each tracks the body's own quote state (quoting.md §5.2). Each skips a backslash-escaped and a marker-escaped character, exactly as the lexer's scan did (lexer.md §10.2).
 
 ### Examples
 
@@ -528,7 +526,7 @@ func ExpandCommandSubstitution(token string, executor SubstitutionExecutor) (str
 
 ## Quoting and Expansion
 
-Quoting controls whether expansion occurs. Quote SEMANTICS are canonical in quoting.md (§2.4, §3.5, §10.4); this section defines only the expansion-side effect of the two token flags:
+Quoting controls whether expansion occurs. Quote SEMANTICS are canonical in quoting.md (§2.4, §3.5, §10.4). This section defines only the expansion-side effect of the token flags:
 
 | Token state | Tilde | Variables / `$?` | Command substitution |
 |-------------|-------|------------------|----------------------|
@@ -551,7 +549,7 @@ Both flags apply to the WHOLE token. Concatenations propagate conservatively (qu
 
 ## Escape Sequences
 
-Escape sequences allow including special characters literally. Escape processing itself happens in the lexer (lexer.md §5); expansion honors the markers it leaves behind.
+Escape sequences allow including special characters literally. Escape processing itself happens in the lexer (lexer.md §5). Expansion honors the markers the lexer leaves behind.
 
 [include:_partials/escape-sequences.md](_partials/escape-sequences.md)
 
@@ -560,7 +558,7 @@ Escape sequences allow including special characters literally. Escape processing
 `\$` and `` \` `` are handled with the escape marker (`\x01`, lexer.md §5.1):
 
 1. Lexer converts `\$` to `\x01$` (and `` \` `` to `` \x01` ``)
-2. Variable expansion skips `\x01$` (keeps it marked); the substitution scanner skips any marker-escaped character
+2. Variable expansion skips `\x01$` and keeps it marked. The substitution scanner skips any marker-escaped character
 3. The final, unconditional stripping step removes every `\x01`, leaving the literal `$` / `` ` ``
 
 The same marker protects spliced expansion results ([Spliced Values Are Protected](#spliced-values-are-protected)).
@@ -585,7 +583,7 @@ Word splitting happens ONCE, at tokenization time (lexer.md §3). Expansion neve
 
 ### Splitting Rules (Tokenization Phase)
 
-1. Whitespace separates tokens; unquoted newlines separate commands (lexer.md §3)
+1. Whitespace separates tokens. An unquoted newline separates commands (lexer.md §3)
 2. Inside quotes or substitution bodies, whitespace is content
 3. Consecutive whitespace is a single separator
 4. Leading/trailing whitespace produces no tokens
@@ -604,7 +602,7 @@ Token boundaries are fixed before expansion runs. Unquoted `$X` and quoted `"$X"
 
 ### Empty Expansion Results Remain Empty Arguments (Documented Divergence)
 
-An unquoted token that expands to the empty string stays in the argument list as an EMPTY argument. POSIX shells drop the empty field during word splitting; Foundation Shell has no post-expansion splitting, and the behavior deliberately matches empty quoted arguments (`""`, lexer.md §4.5):
+An unquoted token that expands to the empty string stays in the argument list as an EMPTY argument. POSIX shells drop the empty field during word splitting. Foundation Shell has no post-expansion splitting. The behavior deliberately matches an empty quoted argument (`""`, lexer.md §4.5):
 
 ```bash
 echo a $UNSET_VAR b   # echo receives 3 arguments: "a", "", "b"
@@ -620,7 +618,7 @@ Foundation Shell supports standard environment variables plus exactly ONE specia
 
 ### Supported: Environment Variables
 
-All environment variables in the shell's environment are accessible (`$HOME`, `$PATH`, `$USER`, ...). Variables are set with `export` or standalone assignment (execution.md §Builtin Commands); all variables are environment variables — there is no local/exported distinction (execution.md).
+All environment variables in the shell's environment are accessible (`$HOME`, `$PATH`, `$USER`, ...). Variables are set with `export` or with a standalone assignment (execution.md §Builtin Commands). Every variable is an environment variable. No local-against-exported distinction exists (execution.md).
 
 ### Supported: `$?` — Last Command-Line Status
 
@@ -633,7 +631,7 @@ All environment variables in the shell's environment are accessible (`$HOME`, `$
 
 #### Per-LINE Semantics (Documented Deviation)
 
-POSIX shells update `$?` after every command. Foundation Shell expands the WHOLE command line at parse time, before anything on the line runs, so every `$?` on a line sees the status from BEFORE the line:
+POSIX shells update `$?` after every command. Foundation Shell expands the WHOLE command line at parse time, before anything on the line runs. Every `$?` on a line therefore sees the status from BEFORE the line:
 
 ```bash
 false ; echo $?    # Prints the status from BEFORE this line (e.g. 0),
@@ -666,13 +664,13 @@ X=hi ; sh -c 'echo $X'     # prints hi — single quotes leave $X for the child
 X=hi ; echo $X             # $X is stale: would print an empty line
 ```
 
-Left unguarded, the last form yields an empty string and reports SUCCESS. Every other unsupported construct in this specification stops the caller; this one would corrupt a result instead. The parser therefore rejects an input that assigns a variable and then expands it (parser.md §Assignment Then Use Is Guarded).
+Left unguarded, the last form yields an empty string and reports SUCCESS. Every other unsupported construct in this specification stops the caller. This one corrupts a result instead. The parser therefore rejects an input that assigns a variable and then expands it (parser.md §Assignment Then Use Is Guarded).
 
 To use a value, run the assignment and the use as SEPARATE inputs — separate interactive lines, or separate `fsh-exec` invocations. Within one input, hand the name to the child instead: `sh -c 'echo $X'`.
 
 ### NOT Supported: Other Special Parameters
 
-Every other POSIX special parameter stays LITERAL — by the recognition rule, a `$` followed by anything but a letter, underscore, `{`, `(`, or `?` is a literal character:
+Every other POSIX special parameter stays LITERAL. The recognition rule decides this. A `$` followed by anything but a letter, an underscore, `{`, `(`, or `?` is a literal character:
 
 | Input | Result | POSIX meaning (not implemented) |
 |-------|--------|---------------------------------|
@@ -684,7 +682,7 @@ Every other POSIX special parameter stays LITERAL — by the recognition rule, a
 
 ### NOT Supported: Parameter Expansion Operators
 
-`${VAR:-default}`, `${VAR:=default}`, `${VAR:+value}`, `${VAR:?error}`, `${#VAR}`, `${VAR%pat}`, `${VAR#pat}`, `${VAR/pat/rep}` are NOT implemented. Under the braced-lookup rule ([Expansion Rules](#expansion-rules) rule 4) such a body is looked up verbatim in the environment and normally expands to EMPTY — it is neither an error nor left literal.
+`${VAR:-default}`, `${VAR:=default}`, `${VAR:+value}`, `${VAR:?error}`, `${#VAR}`, `${VAR%pat}`, `${VAR#pat}`, `${VAR/pat/rep}` are NOT supported. The braced-lookup rule ([Expansion Rules](#expansion-rules) rule 4) governs them. Such a body is looked up verbatim in the environment and normally expands to EMPTY. It is neither an error nor left literal.
 
 ---
 
@@ -737,14 +735,14 @@ echo prefix${MISSING}end # Outputs: prefixend
 
 ### Variable Expansion in Tilde Result
 
-Tilde expansion runs first; its result then undergoes variable expansion:
+Tilde expansion runs first. Its result then undergoes variable expansion:
 
 ```bash
 # HOME=/home/user  MYVAR=value
 echo ~/$MYVAR   # Outputs: /home/user/value
 ```
 
-(The tilde pass splices `$HOME`'s value directly; only the `$MYVAR` reference existed in the token, so only it is expanded by the variable pass.)
+(The tilde pass splices the value of `$HOME` directly. The token held one reference, `$MYVAR`. The variable pass therefore expands that reference alone.)
 
 ---
 
